@@ -1,0 +1,44 @@
+#! /bin/bash
+
+# args[1] must be the json file
+# args[2] is the check option, or-sum of some of the following:
+#       normalCheck_mask = 0x1
+#       ifMultiCmp_mask = 0x2
+#       ifRefresh_mask = 0x4
+# args[3] is the start index of the json file
+
+
+# remove '["' and '"*'
+function get_file_name(){
+    local file=${1#\[\"}
+    echo ${file%%\"*}
+}
+
+if [ ! -d "./cache" ] ; then
+    mkdir ./cache
+fi
+
+cnt=0
+hit=0
+if [ $# -ge 3 ] ; then
+    start=$3
+else
+    start=0
+fi
+while read line ; do
+    if [ $start -gt 0 ] ; then
+        ((start--))
+        continue
+    fi
+    file=$(get_file_name $line)
+    echo "$line" > cache/guide.json
+    python3 checker.py ${file%\.c}.o cache/guide.json $2 >> run.log    # assuming .o file locates at the same directory
+    if [ $? -ne 0 ] ; then
+        echo trigger on $line
+        ((hit++))
+    else
+        echo nothing at $line
+    fi
+    ((cnt++))
+done < $1
+echo trigger $hit / $cnt
