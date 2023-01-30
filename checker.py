@@ -26,7 +26,7 @@ objdumpPath = "/root/binutils-gdb/build/binutils/objdump"
 #   -------------------------------------------
 
 hexChars = '0123456789abcdef'
-ip_offset = 0x50
+ip_offset = 0x30
 
 def create_enum_dict(module):
     ''' for descript iced_x86 int attributes
@@ -65,6 +65,9 @@ def sameMem(i:Instruction, j:Instruction) -> bool:
 
 
 class SourceFile:
+    '''
+    guide info from `.json` file
+    '''
     def __init__ (self, name:str):
         self.name = name
         
@@ -110,6 +113,15 @@ class Result:
         self.inst_i = None
         self.inst_j = None
 
+    def __hash__(self) -> int:
+        return hash(self.inst_i) + hash(self.inst_j)
+
+    def __eq__(self, other) -> bool:
+        return self._lineNo == other._lineNo and\
+            self._srcName == other._srcName and\
+            self.inst_i == other.inst_i and\
+            self.inst_j == other.inst_j
+
     @property
     def lineNo(self):
         return self._lineNo
@@ -139,26 +151,31 @@ class InstSet:
         self.srcName = srcName
         self.lineNo = lineNo
         self.insts:list[Instruction] = []
+        self.discriminatorMap:map[Instruction, int] = {}
 
-    def addIns(self, ins:Instruction):
+    def addIns(self, ins:Instruction, discriminator:int):
         self.insts.append(ins)
+        self.discriminatorMap[ins] = discriminator
     
     def conflict(self, other = None) -> list[Result]:
         if other == None:
             other = self
         reses = []
         factory = InstructionInfoFactory()
-        for i in self.insts:
-            for j in other.insts:
-                if not i is j and hasMem(i) and hasMem(j) and sameMem(i, j)\
-                    and len(factory.info(i).used_memory()) > 0 and is_read(factory.info(i).used_memory()[0])\
-                    and len(factory.info(j).used_memory()) > 0 and is_read(factory.info(j).used_memory()[0])\
-                    and abs(i.ip-j.ip) < ip_offset:
+        for i, ins_i in enumerate(self.insts):
+            for j, ins_j in enumerate(other.insts):
+                if i >= j:
+                    continue
+                if not ins_i is ins_j and hasMem(ins_i) and hasMem(ins_j) and sameMem(ins_i, ins_j)\
+                    and len(factory.info(ins_i).used_memory()) > 0 and is_read(factory.info(ins_i).used_memory()[0])\
+                    and len(factory.info(ins_j).used_memory()) > 0 and is_read(factory.info(ins_j).used_memory()[0])\
+                    and (self!=other or self.discriminatorMap[ins_i] == self.discriminatorMap[ins_j])\
+                    and abs(ins_i.ip-ins_j.ip) < ip_offset:
                     res = Result()
                     res.srcName = self.srcName
                     res.lineNo = self.lineNo
-                    res.inst_i = i
-                    res.inst_j = j
+                    res.inst_i = ins_i
+                    res.inst_j = ins_j
                     reses.append(res)
         return reses
                     
@@ -179,7 +196,7 @@ def expand(lst: list[int], err = 3):
 
 
 def parse_Objdump(elf_path:str, allFunc:set[str]):
-    pc_PosMap: dict[int, tuple[str, int]] = {}
+    pc_PosMap: dict[int, tuple[str, int, int]] = {}
     '''
     parse my-objdump's output, get the correpondence between instruction address
     and line number.
@@ -196,6 +213,7 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
     '''
     funcFlag = ";"
     lineFlag = ":"
+    discriminatorFlag = "discriminator"
     
     lines = []
     if os.path.exists(f"{elf_path}.raw"):
@@ -207,6 +225,7 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
     curFunc = ""
     curFile, lineNo = "", -1
     curAddr = -1 
+    curDiscirminator = 1
     for i, line in enumerate(lines):
         line = line.strip()
         if len(line) == 0:
@@ -216,7 +235,12 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
             curFunc = re.findall(r'(.*)\(\)', line)[0]  # get string before "()"
             assert(len(curFunc)>0)
         elif lineFlag in line:
-            curFile, lineNo = line.split(":")
+            curDiscirminator = 1
+            pure_line = line
+            if discriminatorFlag in line:
+                curDiscirminator = int(re.findall(f'\({discriminatorFlag}\s*(\d+)\)', line)[0])
+                pure_line = re.sub(f'\s*\({discriminatorFlag}\s*(\d+)\)','',line)
+            curFile, lineNo = pure_line.split(":")
             curFile = os.path.abspath(curFile)
             if curFile == "" or lineNo == "":
                 # print("lack file info at first or bad output format", file=sys.stderr)
@@ -247,7 +271,7 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
                 #   with `.text.startup`, so some map may be overrided
                 # comments: ip is based on current section, so main() in `.text.startup`
                 # may start from 0x0 as the same as func_1() in `text`   
-                    pc_PosMap[curAddr] = (curFile, lineNo)
+                    pc_PosMap[curAddr] = (curFile, lineNo, curDiscirminator)
         
     return pc_PosMap
 
@@ -353,8 +377,8 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     formatter = Formatter(FormatterSyntax.GAS)
     
    
-
-    pc_posMap = parse_Objdump(elf_path, allFunc)
+    # dpos: position with discriminator
+    pc_dposMap = parse_Objdump(elf_path, allFunc)
 
 
 
@@ -362,13 +386,14 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     for instr in decoder:
         count +=1
         
-        if instr.ip not in pc_posMap:
+        if instr.ip not in pc_dposMap:
             # print(f"lose {instr.ip:X}")
             lose+=1
             continue
-        pos = pc_posMap[instr.ip]
-        if pos in pos_instsMap:
-            pos_instsMap[pos].addIns(instr)
+        dpos = pc_dposMap[instr.ip]
+        srcName, lineNo, discriminator = dpos
+        if (srcName, lineNo) in pos_instsMap:
+            pos_instsMap[srcName, lineNo].addIns(instr, discriminator)
 
         # pcs.append(instr.ip)
 
@@ -419,7 +444,7 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     #     print(inst)
 
     if normalCheck:
-        reses = []
+        reses:set[Result] = set()
         for srcName in srcs_mp:
             src = srcs_mp[srcName]
             for group in src.lineGroups:
@@ -428,16 +453,20 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
                     for lineNo in group:
                         if (srcName, lineNo) not in pos_instsMap:
                             continue
-                        insts:[Instruction] = pos_instsMap[srcName, lineNo]
-                        reses.extend(insts.conflict())
+                        insts:InstSet = pos_instsMap[srcName, lineNo]
+                        curReses = insts.conflict()
+                        for res in curReses:
+                            reses.add(res)
 
                 elif len(group) == 2:
                     group0, group1 = expand([group[0]], err=1), expand([group[1]], err=1)
                     for line0 in group0:
-                        insts_0:[Instruction] = pos_instsMap[srcName, line0]
+                        insts_0:InstSet = pos_instsMap[srcName, line0]
                         for line1 in group1:
-                            insts_1:[Instruction] = pos_instsMap[srcName, line1]
-                            reses.extend(insts_0.conflict(insts_1))
+                            insts_1:InstSet = pos_instsMap[srcName, line1]
+                            curReses = insts_0.conflict(insts_1)
+                            for res in curReses:
+                                reses.add(res)
 
                 else:
                     assert(0)
@@ -469,6 +498,7 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     #             print(f"{instr.ip:<4X}: {disas:<30} {pc_lineMap[instr.ip]}")
     #     print("")
     #     exit(1)
+    print(f"{len(reses)} warning(s) in total:\n")
     for res in reses:
         print(res)
 

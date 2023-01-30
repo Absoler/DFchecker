@@ -2253,11 +2253,11 @@ show_line (bfd *abfd, asection *section, bfd_vma addr_offset)
 	  && (linenumber != prev_line
 	      || discriminator != prev_discriminator))
 	{
-	  // if (discriminator > 0) //@@
-	  //   printf ("%s:%u (discriminator %u)\n",
-		//     filename == NULL ? "???" : sanitize_string (filename),
-		//     linenumber, discriminator);
-	  // else
+	  if (discriminator > 0)
+	    printf ("%s:%u (discriminator %u)\n",
+		    filename == NULL ? "???" : sanitize_string (filename),
+		    linenumber, discriminator);
+	  else
 	    printf ("%s:%u\n", filename == NULL
 		    ? "???" : sanitize_string (filename),
 		    linenumber);
