@@ -1,6 +1,6 @@
 #! /usr/bin/python3
 import sys
-path_of_pyelftools = "/root/pyelftools/"
+path_of_pyelftools = "/home/pyelftools/"
 sys.path.insert(0, path_of_pyelftools)
 from elftools.elf.elffile import ELFFile
 
@@ -9,13 +9,14 @@ import json
 import time
 import os
 import re
+import bisect
 
 normalCheck_mask = 0x1
 ifMultiCmp_mask = 0x2
 ifRefresh_mask = 0x4
 
 sourcePrefix = ""
-objdumpPath = "/root/binutils-gdb/build/binutils/objdump"
+objdumpPath = "/home/binutils-gdb/build/binutils/objdump"
 
 #   -------------------------------------------
 #   
@@ -26,7 +27,7 @@ objdumpPath = "/root/binutils-gdb/build/binutils/objdump"
 #   -------------------------------------------
 
 hexChars = '0123456789abcdef'
-ip_offset = 0x30
+ip_offset = 0x40
 
 def create_enum_dict(module):
     ''' for descript iced_x86 int attributes
@@ -37,6 +38,8 @@ def create_enum_dict(module):
 op_access_to_str = create_enum_dict(OpAccess)
 code_to_str = create_enum_dict(Code)
 opKindDict = create_enum_dict(OpKind)
+
+all_insts = []  # all instructions, sorted
 
 def hasMem(instr) -> bool:
     # lea inst doesn't access the memory
@@ -157,6 +160,27 @@ class InstSet:
         self.insts.append(ins)
         self.discriminatorMap[ins] = discriminator
     
+    def flowElseWhere(self, inst_i:Instruction, inst_j:Instruction):
+        '''
+        check whether `jmp` or `call` exists between the i-th and 
+        j-th instructions in `insts`, which acess the same memory.
+
+        if yes, we assume this imply no double-fetch happens here
+        '''
+        i_ind = bisect.bisect_left(all_insts, inst_i.ip, 0, len(all_insts), key = lambda ins : ins.ip)
+        j_ind = bisect.bisect_left(all_insts, inst_j.ip, 0, len(all_insts), key = lambda ins : ins.ip)
+        if i_ind > j_ind:
+            i_ind, j_ind = j_ind, i_ind
+        for ind in range(i_ind, j_ind):
+            if code_to_str[all_insts[ind].code].startswith("JMP") or\
+                code_to_str[all_insts[ind].code].startswith("JN") or\
+                code_to_str[all_insts[ind].code].startswith("JE") or\
+                code_to_str[all_insts[ind].code].startswith("JA") or\
+                code_to_str[all_insts[ind].code].startswith("JB") or\
+                code_to_str[all_insts[ind].code].startswith("CALL"):
+                return True
+        return False
+
     def conflict(self, other = None) -> list[Result]:
         if other == None:
             other = self
@@ -170,7 +194,8 @@ class InstSet:
                     and len(factory.info(ins_i).used_memory()) > 0 and is_read(factory.info(ins_i).used_memory()[0])\
                     and len(factory.info(ins_j).used_memory()) > 0 and is_read(factory.info(ins_j).used_memory()[0])\
                     and (self!=other or self.discriminatorMap[ins_i] == self.discriminatorMap[ins_j])\
-                    and abs(ins_i.ip-ins_j.ip) < ip_offset:
+                    and abs(ins_i.ip-ins_j.ip) < ip_offset\
+                    and not self.flowElseWhere(ins_i, ins_j):
                     res = Result()
                     res.srcName = self.srcName
                     res.lineNo = self.lineNo
@@ -319,18 +344,6 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
         
         srcs_mp[fileName].setLine(inputLine[1])
 
-        # for i, group in enumerate(lineGroups):
-        #     for lineNo in group[:]:
-        #         for err in range(1, error+1):
-        #             lineGroups[i].append(lineNo+err)
-        #             lineGroups[i].append(lineNo-err)
-        #     lineGroups[i] = list(set(group))
-        #     for lineNo in group[:]:
-        #         for err in range(1, special_error+1):
-        #             lines_special.append(lineNo+err)
-        #             lines_special.append(lineNo-err)
-        # lines_special = list(set(lines_special))
-
     if showTime:
         print(f'process guide file: {time.time()-startTime:.6}s')
 
@@ -344,7 +357,6 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     
     pc_instMap = {}
     pcs = []    # addresses of all instructions, sorted
-    insts = []  # all instructions, sorted
 
     line_instMap = {}   # int -> list[Instruction]
     problems = {}        # str -> set(int) # can't use set(Instruction) because two instruction with the same function at different ip would be equal
@@ -384,6 +396,7 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
 
     count, lose = 0, 0
     for instr in decoder:
+        all_insts.append(instr)
         count +=1
         
         if instr.ip not in pc_dposMap:
@@ -417,31 +430,6 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
 
     factory = InstructionInfoFactory()
     
-
-    # mx = max(line_instMap.keys())
-    # if normalCheck:
-    #     for group in lineGroups:
-    #         inslst = []
-    #         for line in group:
-    #             if line in line_instMap.keys() and line != mx:
-    #                 inslst.extend(line_instMap[line])
-
-    #         for i in inslst:
-    #             for j in inslst:
-    #                 if not i is j and hasMem(i) and hasMem(j) and sameMem(i, j)\
-    #                     and len(factory.info(i).used_memory()) > 0 and is_read(factory.info(i).used_memory()[0])\
-    #                     and len(factory.info(j).used_memory()) > 0 and is_read(factory.info(j).used_memory()[0]):
-    #                     groupDesc = "-".join([str(v) for v in group])
-    #                     if groupDesc not in problems:    # use some line in group as index
-    #                         problems[groupDesc] = set()
-    #                     problems[groupDesc].add(i.ip)
-    #                     problems[groupDesc].add(j.ip)
-
-    # print(srcs_mp["/root/linux-6.0-rc6/drivers/input/serio/i8042.c"].lineGroups)
-    # test_insts=pos_instsMap["/root/linux-6.0-rc6/drivers/input/serio/i8042.c", 408]
-    # print(len(test_insts.insts))
-    # for inst in test_insts.insts:
-    #     print(inst)
 
     if normalCheck:
         reses:set[Result] = set()
@@ -502,7 +490,7 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     for res in reses:
         print(res)
 
-def checkIfMultiCmp(index:int, insts:list, code_to_str:dict, opkind_to_str:dict, pc_lineMap:dict):
+def checkIfMultiCmp(index:int, insts:list[Instruction], code_to_str:dict, opkind_to_str:dict, pc_lineMap:dict):
     if not ( (code_to_str[insts[index].code].startswith("MOV") and "MEMORY" in opkind_to_str[insts[index].op1_kind]) or \
         (code_to_str[insts[index].code].startswith("CMP") and \
         ("MEMORY" in opkind_to_str[insts[index].op0_kind] or "MEMORY" in opkind_to_str[insts[index].op1_kind])) ) :
