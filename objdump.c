@@ -3354,7 +3354,7 @@ disassemble_bytes (struct disassemble_info *inf,
 	  else
 	    {
 	      aux->require_sec = true;
-	      // objdump_print_address (section->vma + addr_offset, inf); //@@
+	      objdump_print_address (section->vma + addr_offset, inf); //@@
 	      aux->require_sec = false;
 	      putchar (' ');
 	    }
@@ -3942,10 +3942,10 @@ disassemble_section (bfd *abfd, asection *section, void *inf)
 
       if (! prefix_addresses && do_print)
 	{
-	  // pinfo->fprintf_func (pinfo->stream, "\n");
-	  // objdump_print_addr_with_sym (abfd, section, sym, addr,
-		// 		       pinfo, false);
-	  // pinfo->fprintf_func (pinfo->stream, ":\n");
+	  pinfo->fprintf_func (pinfo->stream, "\n");
+	  objdump_print_addr_with_sym (abfd, section, sym, addr,
+				       pinfo, false);
+	  pinfo->fprintf_func (pinfo->stream, ":\n");
 
 	  if (sym != NULL && show_all_symbols)
 	    {

@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 import sys
+import argparse
 path_of_pyelftools = "/home/pyelftools/"
 sys.path.insert(0, path_of_pyelftools)
 from elftools.elf.elffile import ELFFile
@@ -15,6 +16,9 @@ normalCheck_mask = 0x1
 ifMultiCmp_mask = 0x2
 ifRefresh_mask = 0x4
 
+permit_relocatable:bool = True
+is_relocatable:bool = False
+
 sourcePrefix = ""
 objdumpPath = "/home/binutils-gdb/build/binutils/objdump"
 
@@ -22,7 +26,7 @@ objdumpPath = "/home/binutils-gdb/build/binutils/objdump"
 #   
 #   args[1]: binary file to be detected
 #   args[2]: json file, recording src_path and problematic line number(s)
-#   args[3]: check option
+#   args[3]: check option, default as 0x1
 #
 #   -------------------------------------------
 
@@ -37,7 +41,7 @@ def create_enum_dict(module):
 # reg_to_str = create_enum_dict(Register)
 op_access_to_str = create_enum_dict(OpAccess)
 code_to_str = create_enum_dict(Code)
-opKindDict = create_enum_dict(OpKind)
+opKind_to_str = create_enum_dict(OpKind)
 
 all_insts = []  # all instructions, sorted
 
@@ -57,7 +61,7 @@ def is_read(mem:UsedMemory) -> bool:
 def sameMem(i:Instruction, j:Instruction) -> bool:
     if  i.memory_base == Register.RIP and \
         j.memory_base == Register.RIP and \
-        i.memory_displacement == j.memory_displacement:
+        ( i.memory_displacement == j.memory_displacement or (permit_relocatable and is_relocatable ) ):
         return True
     if  i.memory_base == j.memory_base and \
             i.memory_index == j.memory_index and \
@@ -91,6 +95,7 @@ class SourceFile:
         '''
         parse lineStrs: [str] belong to this file and record problematic lines
         '''
+        assert(type(lineStrs) == list)
         if len(lineStrs) == 0:
             # no problematic line(s)
             return
@@ -100,6 +105,8 @@ class SourceFile:
                 continue
             if " " in s:
                 lineNum = [int(no) for no in s.split()]
+            elif "-" in s:
+                lineNum = [int(no) for no in s.split('-')]
             else:
                 lineNum = [int(s)]
 
@@ -110,11 +117,11 @@ class SourceFile:
 srcs_mp:dict[str, SourceFile] = {} 
 
 class Result:
-    def __init__ (self):
-        self._lineNo = -1
-        self._srcName = ""
-        self.inst_i = None
-        self.inst_j = None
+    def __init__ (self, lineNo:int = -1, srcName:str = "", _inst_i:Instruction = None, _inst_j:Instruction = None):
+        self._lineNo = lineNo
+        self._srcName = srcName
+        self.inst_i = _inst_i
+        self.inst_j = _inst_j
 
     def __hash__(self) -> int:
         return hash(self.inst_i) + hash(self.inst_j)
@@ -139,6 +146,14 @@ class Result:
     def srcName(self, value:str):
         self._srcName = value
 
+    def simpleMsg(self) -> str:
+        info = f"{self._srcName}:{self._lineNo}"
+        return info
+
+    def jsonMsg(self) -> str:
+        info = {f'{self._srcName}:{self._lineNo}' : [[f"{self.inst_i.ip:X}", f"{self.inst_i}"], [f"{self.inst_j.ip:X}", f"{self.inst_j}"]]}
+        return json.dumps(info)
+    
     def __repr__(self) -> str:
         info = f"problem at {self._srcName}:{self._lineNo}\n"
         info += f"{self.inst_i.ip:X} {self.inst_i}\n"
@@ -154,11 +169,13 @@ class InstSet:
         self.srcName = srcName
         self.lineNo = lineNo
         self.insts:list[Instruction] = []
-        self.discriminatorMap:map[Instruction, int] = {}
+        self.discriminatorMap:dict[int, int] = {}
+        self.realFuncMap:dict[int, str] = {}
 
-    def addIns(self, ins:Instruction, discriminator:int):
+    def addIns(self, ins:Instruction, discriminator:int, realFunc:str):
         self.insts.append(ins)
-        self.discriminatorMap[ins] = discriminator
+        self.discriminatorMap[ins.ip] = discriminator
+        self.realFuncMap[ins.ip] = realFunc
     
     def flowElseWhere(self, inst_i:Instruction, inst_j:Instruction):
         '''
@@ -177,9 +194,38 @@ class InstSet:
                 code_to_str[all_insts[ind].code].startswith("JE") or\
                 code_to_str[all_insts[ind].code].startswith("JA") or\
                 code_to_str[all_insts[ind].code].startswith("JB") or\
+                code_to_str[all_insts[ind].code].startswith("JG") or\
+                code_to_str[all_insts[ind].code].startswith("JL") or\
                 code_to_str[all_insts[ind].code].startswith("CALL"):
                 return True
         return False
+
+    def usingStack(self, ins: Instruction) -> bool:
+        cond1 = ins.memory_base == Register.RSP or ins.memory_base == Register.RBP \
+            or ins.memory_index == Register.RSP or ins.memory_index == Register.RBP
+        return cond1
+
+    def isIncidentLoad(self, ins:Instruction) -> bool:
+        ''' 
+        '''
+        return False
+        code_desc = code_to_str[ins.code]
+        cal_prefix = ["ADD", "SUB"]
+        for prefix in cal_prefix:
+            if code_desc.startswith(prefix) and \
+            ins.op_count >= 2 \
+            and opKind_to_str[ins.op0_kind].startswith("MEMORY") \
+            and not opKind_to_str[ins.op1_kind].startswith("MEMORY"):
+                return True
+        return False
+
+    def breakByPush(self, ins_i:Instruction, ins_j:Instruction) -> bool:
+        cond1 = code_to_str[ins_i.code].startswith("PUSH") or code_to_str[ins_j.code].startswith("PUSH")
+        cond2 = ins_i.memory_base == Register.RBP or ins_i.memory_index == Register.RBP\
+        or ins_i.memory_base == Register.RSP or ins_i.memory_index == Register.RSP
+
+        return cond1 and cond2
+
 
     def conflict(self, other = None) -> list[Result]:
         if other == None:
@@ -193,23 +239,42 @@ class InstSet:
                 if not ins_i is ins_j and hasMem(ins_i) and hasMem(ins_j) and sameMem(ins_i, ins_j)\
                     and len(factory.info(ins_i).used_memory()) > 0 and is_read(factory.info(ins_i).used_memory()[0])\
                     and len(factory.info(ins_j).used_memory()) > 0 and is_read(factory.info(ins_j).used_memory()[0])\
-                    and (self!=other or self.discriminatorMap[ins_i] == self.discriminatorMap[ins_j])\
+                    and (self!=other or self.discriminatorMap[ins_i.ip] == self.discriminatorMap[ins_j.ip])\
+                    and (self!=other or self.realFuncMap[ins_i.ip] == self.realFuncMap[ins_j.ip])\
                     and abs(ins_i.ip-ins_j.ip) < ip_offset\
-                    and not self.flowElseWhere(ins_i, ins_j):
-                    res = Result()
-                    res.srcName = self.srcName
-                    res.lineNo = self.lineNo
-                    res.inst_i = ins_i
-                    res.inst_j = ins_j
+                    and not self.breakByPush(ins_i, ins_j)  \
+                    and (not self.isIncidentLoad(ins_i)) and (not self.isIncidentLoad(ins_j)) \
+                    and not self.flowElseWhere(ins_i, ins_j) \
+                    and (not self.usingStack(ins_i) and (not self.usingStack(ins_j))):
+                    res = Result(self.lineNo, self.srcName, ins_i, ins_j)
                     reses.append(res)
         return reses
-                    
-pos_instsMap: dict[tuple[str, int], InstSet] = {}
+    
+    def conflict_in_ifMultiCmp(self):
+        reses = []
+        for i, inst in enumerate(self.insts):
 
+            firstLoad, secondLoad = checkIfMultiCmp(i, self.insts, code_to_str, opKind_to_str)
+            if firstLoad == -1 or secondLoad == -1:
+                continue
+            if self.usingStack(self.insts[firstLoad]) or self.usingStack(self.insts[secondLoad]):
+                continue
+        
+            if self.realFuncMap[self.insts[firstLoad].ip] != self.realFuncMap[self.insts[secondLoad].ip]:
+                continue
+            reses.append(Result(self.lineNo, self.srcName, self.insts[firstLoad], self.insts[secondLoad]))
+        return reses
+              
+pos_instsMap: dict[tuple[str, int], InstSet] = {}
 '''
-    add tolerance for line number(s)
-'''
+    map `fileName, lineNo` to `InstSet`, the crucial info
+''' 
+
+
 def expand(lst: list[int], err = 3):
+    '''
+        add tolerance for line number(s) in debug info
+    '''
     if len(lst) == 0:
         return []
     # mxLine = max(lst)
@@ -220,23 +285,55 @@ def expand(lst: list[int], err = 3):
     return list(set( lst + errElems ))
 
 
-def parse_Objdump(elf_path:str, allFunc:set[str]):
-    pc_PosMap: dict[int, tuple[str, int, int]] = {}
+def parse_Objdump(elf_path:str, allFunc:set[str]) -> dict[int, tuple[str, int, int, str]]:
+    pc_dPosMap: dict[int, tuple[str, int, int, str]] = {}
     '''
     parse my-objdump's output, get the correpondence between instruction address
     and line number.
 
     my-objdump's output is like:
 
-    func1();
-    file:line
+    addr <RealFunc>:
+    func1():
+    file:lineNo
     0
     2
     ...
-    func2();
+    func2():
+    file:lineNo (discriminator Num)
 
     '''
-    funcFlag = ";"
+    def isFileLine(line:str) -> re.Match:
+        ''' format: filePath:lineNo (discriminator Num)
+        '''
+        isFileLine.regex = re.compile(r'\S+:\d+')
+        return isFileLine.regex.match(line)
+    
+    def isFunc(line:str):
+        ''' format: func1():
+        '''
+        isFunc.regex = re.compile(r'\w+\(\)')
+        return isFunc.regex.match(line)
+    
+    def isRealFunc(line:str) -> re.Match:
+        ''' format: addr <func>:
+        '''
+        isRealFunc.regex = re.compile(r'[\s\w]*<([\w@\.]+)>')
+        return isRealFunc.regex.match(line)
+    
+    def isAddress(line:str) -> bool:
+        ''' format: hexNum
+        '''
+        isAddress.regex = re.compile(r'^[a-fA-F0-9]+$')
+        if not isAddress.regex.match(line):
+            print("unrecognized line: " + line, file=sys.stderr)
+            assert(0)
+        return isAddress.regex.match(line).span() == (0, len(line))
+    
+    def isDebug(feat):
+        return feat == "sqlite3BtreeGetAutoVacuum"
+        # return False
+
     lineFlag = ":"
     discriminatorFlag = "discriminator"
     
@@ -247,19 +344,22 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
             lines = f.readlines()
     else:
         lines = os.popen(f"{objdumpPath} -dl {elf_path}").readlines()
+    curRealFunc = ""
+    isValidFunc = False
     curFunc = ""
     curFile, lineNo = "", -1
     curAddr = -1 
     curDiscirminator = 1
+    
     for i, line in enumerate(lines):
         line = line.strip()
         if len(line) == 0:
             continue
         # if no "()" then "demangle" in line
-        if funcFlag in line:
+        if isFunc(line):
             curFunc = re.findall(r'(.*)\(\)', line)[0]  # get string before "()"
             assert(len(curFunc)>0)
-        elif lineFlag in line:
+        elif isFileLine(line):
             curDiscirminator = 1
             pure_line = line
             if discriminatorFlag in line:
@@ -271,7 +371,18 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
                 # print("lack file info at first or bad output format", file=sys.stderr)
                 continue
             lineNo = int(lineNo)
+        elif isRealFunc(line):
+            curRealFunc = isRealFunc(line).group(1)
+            if ".plt" in curRealFunc or "@plt" in curRealFunc:
+                isValidFunc = False
+            else:
+                isValidFunc = True
+            assert(len(curRealFunc)>0)
         else:
+            
+            if not isValidFunc:
+                continue
+
             if not all ([c in hexChars for c in line]):
                 # print("lack file info at first or bad output format", file=sys.stderr)
                 continue
@@ -289,70 +400,90 @@ def parse_Objdump(elf_path:str, allFunc:set[str]):
             try to avoid them, this may cause no fn because the var-use I care basically
             belong to the current file, not in a function call
             '''
-            
+            # if isDebug(curRealFunc):
+            #     print(f"get {curFunc} {funcExist} {curFile}")
             if funcExist and ".c" in curFile:
-                if curAddr not in pc_PosMap:
+                if curAddr not in pc_dPosMap:
                 # ! readelf can't get `.text` section accurately, and it may mix
                 #   with `.text.startup`, so some map may be overrided
                 # comments: ip is based on current section, so main() in `.text.startup`
                 # may start from 0x0 as the same as func_1() in `text`   
-                    pc_PosMap[curAddr] = (curFile, lineNo, curDiscirminator)
-        
-    return pc_PosMap
+                    pc_dPosMap[curAddr] = (curFile, lineNo, curDiscirminator, curRealFunc)
+            
+                        
+    return pc_dPosMap
 
-def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
+def check_loads(elf:ELFFile, args:argparse.Namespace):
     '''
     check whether there's compiler-introduced double fetch
     ### conditions:
     1. duplicate address used in instructions from the same line
     '''
 
+    # cmd control options
+    elf_path:str = args.exe
+    checkGuide:str = args.guide
+    option:int = args.option
+    filterBy:str = args.filterBy
+    useSimpleGuide:bool = args.useSimpleGuide
+    showTime:bool = args.showTime
+    showDisas:bool = args.showDisas
+
     # some important vars
-    objdumpPath = "/root/binutils-gdb/build/binutils/objdump"
     startTime = 0
-    # some control options
-    showDisas = False
     error = 2   # permissible lineNo error
     special_error = 10 # for special check, relax restrictions
-    showTime = False
 
+    # check type
     normalCheck = option & 0x1
     need_checkIfMultiCmp = option & 0x2
     need_checkIfRefresh = option & 0x4
 
+    no_guide = (checkGuide == "noGuide")
+    # only some modes support full scanning
+    # only `one line` double fetch check
+    assert( need_checkIfMultiCmp or normalCheck )
+
     '''
     process guide file from coccinelle's match result, the format is:
 
-    [ src_file:str, [ lineNo:int | "lineNo lineNo ..." ] ]
+    [ src_file:str, [ "lineNo" | "lineNo lineNo ..." ] ]
     
     file should be the absolute path
     '''
     if showTime:
         startTime = time.time()
 
-    lineGroups_map = {} # { file.c -> [ [int ], [int ] .. ] }
-    # lines_special = []  #  [int], for special check
-    for lineNo in open(checkGuide, "r+"):
-        if len(lineNo.strip()) == 0:
-            continue
-        inputLine = json.loads(lineNo)
-        assert(len(inputLine)==2)
-        
-        fileName = os.path.abspath(inputLine[0])
-        if fileName not in srcs_mp:
-            srcs_mp[fileName] = SourceFile(fileName)
-        
-        srcs_mp[fileName].setLine(inputLine[1])
+    # lineGroups_map = {} # { file.c -> [ [int ], [int ] .. ] }
+    '''
+        fill srcs_mp based on given guide info
+    '''
+    if not no_guide:
+        if not useSimpleGuide:
+            for lineNo in open(checkGuide, "r+"):
+                if len(lineNo.strip()) == 0:
+                    continue
+                inputLine = json.loads(lineNo)
+                assert(len(inputLine)==2)
+                
+                fileName = os.path.abspath(inputLine[0])
+                if fileName not in srcs_mp:
+                    srcs_mp[fileName] = SourceFile(fileName)
+                
+                srcs_mp[fileName].setLine(inputLine[1])
+        else:
+            ''' must be single file test, may be relocatable file
+            '''
+            src_path = elf_path.replace(".o", "") + ".c"
+            srcs_mp[src_path] = SourceFile(src_path)
+            srcs_mp[src_path].setLine([checkGuide])
+
 
     if showTime:
-        print(f'process guide file: {time.time()-startTime:.6}s')
+        print(f'process guide file: {time.time()-startTime:.6}s', file=sys.stderr)
 
 
-    # init all instSet, only for those are relative to problematic line(s)
-    for srcName in srcs_mp:
-        allLineNos = expand(sum(srcs_mp[srcName].lineGroups, []))
-        for lineNo in allLineNos:
-            pos_instsMap[srcName, lineNo] = InstSet(srcName, lineNo)
+    
 
     
     pc_instMap = {}
@@ -361,6 +492,11 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     line_instMap = {}   # int -> list[Instruction]
     problems = {}        # str -> set(int) # can't use set(Instruction) because two instruction with the same function at different ip would be equal
 
+
+    '''
+        get all function names from symbol table
+
+    '''
     allFunc = set()  # set(str) save all function names from symtable
     symsec = elf.get_section_by_name(".symtab")
     if not symsec:
@@ -370,10 +506,13 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
         if "STT_FUNC" == sym['st_info']['type']:
             allFunc.add(sym.name)
 
-
     if showTime:
-        print(f'get func names: {time.time()-startTime:.6}s')
+        print(f'get func names: {time.time()-startTime:.6}s', file=sys.stderr)
 
+
+    '''
+        extract code segment
+    '''
     text = elf.get_section_by_name('.text')
     code_addr = text['sh_addr']
     
@@ -389,11 +528,42 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
     formatter = Formatter(FormatterSyntax.GAS)
     
    
-    # dpos: position with discriminator
+    # dpos: position with discriminator and realFunc
     pc_dposMap = parse_Objdump(elf_path, allFunc)
+    
+    if showTime:
+        print(f"parse disassemble with objdump {time.time()-startTime:.6}s", file=sys.stderr)
 
+    '''
+    for full scan, fill srcs_mp with all lines  
+    '''
+    if no_guide:
+        temp_srcName_lines: dict[str, set[int]] = {}
+        for dpos in pc_dposMap.values():
+            srcName, line, _, _ = dpos
+            if srcName not in temp_srcName_lines:
+                temp_srcName_lines[srcName] = set()
+            temp_srcName_lines[srcName].add(line)
+        
+        for srcName in temp_srcName_lines:
+            srcs_mp[srcName] = SourceFile(srcName)
+            for line in temp_srcName_lines[srcName]:
+                srcs_mp[srcName].setLine([str(line)])
 
+    '''
+        init all instSet, only for those are relative to problematic line(s)
+        need srcs_mp to know which position are check targets
+    '''
+    for srcName in srcs_mp:
+        allLineNos = expand(sum(srcs_mp[srcName].lineGroups, []))
+        for lineNo in allLineNos:
+            pos_instsMap[srcName, lineNo] = InstSet(srcName, lineNo)
 
+    '''
+        iterate through all insts, for every instrucion
+        1. use `pc_dposMap` to get corresponding position [fileName, lineNo]
+        2. set this inst in `pos_instsMap` 
+    '''
     count, lose = 0, 0
     for instr in decoder:
         all_insts.append(instr)
@@ -404,35 +574,26 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
             lose+=1
             continue
         dpos = pc_dposMap[instr.ip]
-        srcName, lineNo, discriminator = dpos
+        srcName, lineNo, discriminator, realFunc = dpos
+        
         if (srcName, lineNo) in pos_instsMap:
-            pos_instsMap[srcName, lineNo].addIns(instr, discriminator)
-
-        # pcs.append(instr.ip)
-
-        # pc_instMap[instr.ip] = instr
-        # if line not in line_instMap.keys():
-        #     line_instMap[line] = []
-        # line_instMap[line].append(instr)
-
+            pos_instsMap[srcName, lineNo].addIns(instr, discriminator, realFunc)
 
         if showDisas:
             dumpInstr = f'{instr.ip:<4X}: {formatter.format(instr):<30}'
             print(dumpInstr)
     # print(f"lose {lose}/{count}")
     if showTime:
-        print(f'process {count} insts: {time.time()-startTime:.6}s')
+        print(f'process {count} insts: {time.time()-startTime:.6}s', file=sys.stderr)
 
-    # pcs.sort()
-    # for pc in pcs:
-    #     insts.append(pc_instMap[pc])
     
 
-    factory = InstructionInfoFactory()
     
-
+    '''
+        start check
+    '''
+    normalReses:set[Result] = set()
     if normalCheck:
-        reses:set[Result] = set()
         for srcName in srcs_mp:
             src = srcs_mp[srcName]
             for group in src.lineGroups:
@@ -444,7 +605,7 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
                         insts:InstSet = pos_instsMap[srcName, lineNo]
                         curReses = insts.conflict()
                         for res in curReses:
-                            reses.add(res)
+                            normalReses.add(res)
 
                 elif len(group) == 2:
                     group0, group1 = expand([group[0]], err=1), expand([group[1]], err=1)
@@ -454,52 +615,64 @@ def check_loads(elf:ELFFile, elf_path:str, checkGuide:str, option:int):
                             insts_1:InstSet = pos_instsMap[srcName, line1]
                             curReses = insts_0.conflict(insts_1)
                             for res in curReses:
-                                reses.add(res)
+                                normalReses.add(res)
 
                 else:
                     assert(0)
-        
-
-
-
-
     
-    # for i, pc in enumerate(pcs):
-    #     if pc in pc_lineMap and pc_lineMap[pc] in lines_special:
-    #         if need_checkIfMultiCmp and checkIfMultiCmp(i, insts, code_to_str, opKindDict, pc_lineMap) or\
-    #             need_checkIfRefresh and checkIfRefresh(i, insts, code_to_str, opKindDict):
-    #             line_str = str(pc_lineMap[pc])
-    #             if line_str not in problems:
-    #                 problems[line_str] = set()
-    #             problems[line_str].add(pc)
+    ifMultReses:set[Result] = set()
+    if need_checkIfMultiCmp:    
+        for srcName in srcs_mp:
+            src = srcs_mp[srcName]
+            for group in src.lineGroups:
+                group = expand(group, err=3)
+                for lineNo in group:
+                    if (srcName, lineNo) not in pos_instsMap:
+                        continue
+                    insts:InstSet = pos_instsMap[srcName, lineNo]
+                    curReses = insts.conflict_in_ifMultiCmp()
+                    for res in curReses:
+                        ifMultReses.add(res)    
+
 
     if showTime:
-        print(f'analysis: {time.time()-startTime:.6}')
+        print(f'analysis: {time.time()-startTime:.6}', file=sys.stderr)
 
-    # if problems:
-    #     print(inputLine)
-    #     for line in problems.keys():
-    #         print("problematic line(s): " + line)
-    #         for ip in problems[line]:
-    #             instr = pc_instMap[ip]
-    #             disas = formatter.format(instr)
-    #             print(f"{instr.ip:<4X}: {disas:<30} {pc_lineMap[instr.ip]}")
-    #     print("")
-    #     exit(1)
-    print(f"{len(reses)} warning(s) in total:\n")
-    for res in reses:
-        print(res)
+    if filterBy:
+        for line in open(filterBy, "r"):
+            pass
 
-def checkIfMultiCmp(index:int, insts:list[Instruction], code_to_str:dict, opkind_to_str:dict, pc_lineMap:dict):
+    print(f"{len(normalReses) + len(ifMultReses)} warning(s) in total:\n")
+    
+    print(f"\nnormal check:")
+    for res in normalReses:
+        print(res.jsonMsg())
+        print()
+    
+    print(f"\nifMultiCmp check:")
+    for res in ifMultReses:
+        print(res.jsonMsg())
+        print()
+
+    if len(normalReses) + len(ifMultReses) > 0:
+        return 1
+    else:
+        return 0
+
+def checkIfMultiCmp(index:int, insts:list[Instruction], code_to_str:dict, opkind_to_str:dict) -> tuple[int, int]:
     if not ( (code_to_str[insts[index].code].startswith("MOV") and "MEMORY" in opkind_to_str[insts[index].op1_kind]) or \
         (code_to_str[insts[index].code].startswith("CMP") and \
         ("MEMORY" in opkind_to_str[insts[index].op0_kind] or "MEMORY" in opkind_to_str[insts[index].op1_kind])) ) :
-        return False
+        return [-1, -1]
 
-    output = 0
     nextLoadInd = -1    # index of next cmp/mov inst which accesses the same memory
     segRange = 10    # max distance accepted between two cmp/mov
     for i in range(index+1, min(index+segRange, len(insts)) ):
+        assert(insts[i-1].ip<insts[i].ip)
+        if insts[i].ip - insts[index].ip > ip_offset * 2:
+            ''' ip's difference shouldn't be too large, too
+            '''
+            break
         if not ( (code_to_str[insts[i].code].startswith("MOV") and "MEMORY" in opkind_to_str[insts[i].op1_kind]) or \
             (code_to_str[insts[i].code].startswith("CMP") and \
             ("MEMORY" in opkind_to_str[insts[i].op0_kind] or "MEMORY" in opkind_to_str[insts[i].op1_kind])) ):
@@ -510,7 +683,7 @@ def checkIfMultiCmp(index:int, insts:list[Instruction], code_to_str:dict, opkind
             break
     
     if nextLoadInd == -1:
-        return False
+        return [-1, -1]
     
     firstFeat, secondFeat = -1, -1
     for i in range(index, min(index+segRange, len(insts)) ):
@@ -532,15 +705,14 @@ def checkIfMultiCmp(index:int, insts:list[Instruction], code_to_str:dict, opkind
             break
     
     if firstFeat == -1 or secondFeat == -1:
-        return False
+        return [-1, -1]
 
-    if insts[index].ip in pc_lineMap and insts[nextLoadInd].ip in pc_lineMap and\
-        abs(pc_lineMap[insts[index].ip] - pc_lineMap[insts[nextLoadInd].ip]) > 0:
-        return False
+    #! no need because passed-in insts belong to the same position
+    # if insts[index].ip in pc_lineMap and insts[nextLoadInd].ip in pc_lineMap and\
+    #     abs(pc_lineMap[insts[index].ip] - pc_lineMap[insts[nextLoadInd].ip]) > 0:
+    #     return False
 
-    if output:
-        print(f"nextLoad is {insts[nextLoadInd]}")
-    return True
+    return [index, nextLoadInd]
 
 class MemInfo:
         def __init__(self, isGlobal:bool, base, index, scale, disp, isRead:bool) -> None:
@@ -672,12 +844,20 @@ def checkIfRefresh(index:int, insts:list, codeDict:dict, opKindDict:dict) -> boo
     return False
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        exit(0)
-    file = open(sys.argv[1], "rb")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--exe", "-e", help="specify analyzed executable file", required=True, type=str)
+    parser.add_argument("--guide", "-g", help="specify guide file or nums joined by `-`", required=True)
+    parser.add_argument("--option", "-opt", help="analysis choice", default=1, type=int)
+    parser.add_argument("--filterBy", "-fb", help="filter result use an existing result file, of single line json format", type=str)
+    parser.add_argument("--useSimpleGuide", "-sG", help="use nums joined by `-` to check only one file", action="store_true")
+    parser.add_argument("--showTime", "-t", help="show time used in each part", action="store_true")
+    parser.add_argument("--showDisas", "-d", help="show disassemble code", action="store_true")
+    args:argparse.Namespace = parser.parse_args()
+    
+    file = open(args.exe, "rb")
     elf = ELFFile(file)
 
-    option = int(sys.argv[3], 16)
-
-    check_loads(elf, sys.argv[1], sys.argv[2], option)
+    is_relocatable = str(args.exe).endswith(".o")
+    ret = check_loads(elf, args)
     file.close()
+    exit(ret)
