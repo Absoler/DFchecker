@@ -206,9 +206,10 @@ class InstSet:
         return cond1
 
     def isIncidentLoad(self, ins:Instruction) -> bool:
-        ''' 
+        '''     filter instruction such as `add 1, [mem]`
+                in `iced_x86.Instruction`, op0 is the dest operand
         '''
-        return False
+        # return False
         code_desc = code_to_str[ins.code]
         cal_prefix = ["ADD", "SUB"]
         for prefix in cal_prefix:
@@ -220,11 +221,26 @@ class InstSet:
         return False
 
     def breakByPush(self, ins_i:Instruction, ins_j:Instruction) -> bool:
+        # push will modify the value of rbp or rsp, so the next load won't access the same position
         cond1 = code_to_str[ins_i.code].startswith("PUSH") or code_to_str[ins_j.code].startswith("PUSH")
         cond2 = ins_i.memory_base == Register.RBP or ins_i.memory_index == Register.RBP\
         or ins_i.memory_base == Register.RSP or ins_i.memory_index == Register.RSP
 
         return cond1 and cond2
+
+    def regModified(self, firstInd:int, secondInd:int, insts:list[Instruction]):
+        ''' base or index reg used by the first load inst may be modified
+            between these two instructions, range: [first, second)
+        '''
+        if not opKind_to_str [insts[firstInd].op1_kind].startswith("MEMORY"):
+            return False
+        base, index = insts[firstInd].memory_base, insts[firstInd].memory_index
+        for i in range(firstInd, secondInd):
+            ins = insts[i]
+            if ins.op0_kind == OpKind.REGISTER and\
+                (ins.op0_register == base or ins.op0_register == index):
+                return True
+        return False
 
 
     def conflict(self, other = None) -> list[Result]:
@@ -245,7 +261,8 @@ class InstSet:
                     and not self.breakByPush(ins_i, ins_j)  \
                     and (not self.isIncidentLoad(ins_i)) and (not self.isIncidentLoad(ins_j)) \
                     and not self.flowElseWhere(ins_i, ins_j) \
-                    and (not self.usingStack(ins_i) and (not self.usingStack(ins_j))):
+                    and (not self.usingStack(ins_i) and (not self.usingStack(ins_j))) \
+                    and (self != other or not self.regModified(i, j, self.insts)):
                     res = Result(self.lineNo, self.srcName, ins_i, ins_j)
                     reses.append(res)
         return reses
@@ -261,6 +278,9 @@ class InstSet:
                 continue
         
             if self.realFuncMap[self.insts[firstLoad].ip] != self.realFuncMap[self.insts[secondLoad].ip]:
+                continue
+
+            if self.regModified(firstLoad, secondLoad, self.insts):
                 continue
             reses.append(Result(self.lineNo, self.srcName, self.insts[firstLoad], self.insts[secondLoad]))
         return reses
@@ -287,6 +307,7 @@ def expand(lst: list[int], err = 3):
 
 def parse_Objdump(elf_path:str, allFunc:set[str]) -> dict[int, tuple[str, int, int, str]]:
     pc_dPosMap: dict[int, tuple[str, int, int, str]] = {}
+    # print(len(allFunc))
     '''
     parse my-objdump's output, get the correpondence between instruction address
     and line number.
@@ -303,32 +324,24 @@ def parse_Objdump(elf_path:str, allFunc:set[str]) -> dict[int, tuple[str, int, i
     file:lineNo (discriminator Num)
 
     '''
-    def isFileLine(line:str) -> re.Match:
-        ''' format: filePath:lineNo (discriminator Num)
-        '''
-        isFileLine.regex = re.compile(r'\S+:\d+')
-        return isFileLine.regex.match(line)
+    startTime = time.time()
     
-    def isFunc(line:str):
-        ''' format: func1():
-        '''
-        isFunc.regex = re.compile(r'\w+\(\)')
-        return isFunc.regex.match(line)
+    ''' format: filePath:lineNo (discriminator Num)
+    '''
+    isFileLine_regex = re.compile(r'\S+:\d+')
     
-    def isRealFunc(line:str) -> re.Match:
-        ''' format: addr <func>:
-        '''
-        isRealFunc.regex = re.compile(r'[\s\w]*<([\w@\.]+)>')
-        return isRealFunc.regex.match(line)
+    ''' format: func1():
+    '''
+    isFunc_regex = re.compile(r'\S+\(\):')
     
-    def isAddress(line:str) -> bool:
-        ''' format: hexNum
-        '''
-        isAddress.regex = re.compile(r'^[a-fA-F0-9]+$')
-        if not isAddress.regex.match(line):
-            print("unrecognized line: " + line, file=sys.stderr)
-            assert(0)
-        return isAddress.regex.match(line).span() == (0, len(line))
+    ''' format: addr <func>:
+    '''
+    isRealFunc_regex = re.compile(r'[\s\w]*<([\w@\.]+)>:')
+    
+    ''' format: hexNum
+    '''
+    isAddress_regex = re.compile(r'^[a-fA-F0-9]+$')
+    
     
     def isDebug(feat):
         return feat == "sqlite3BtreeGetAutoVacuum"
@@ -352,27 +365,33 @@ def parse_Objdump(elf_path:str, allFunc:set[str]) -> dict[int, tuple[str, int, i
     curDiscirminator = 1
     
     for i, line in enumerate(lines):
+        # if i%2000 == 0:
+        #     print(f'    process raw {i}  {time.time()-startTime:.6}s', file=sys.stderr)
         line = line.strip()
         if len(line) == 0:
             continue
         # if no "()" then "demangle" in line
-        if isFunc(line):
+        if isFunc_regex.match(line) and len(line) == isFunc_regex.match(line).span()[1]:
             curFunc = re.findall(r'(.*)\(\)', line)[0]  # get string before "()"
             assert(len(curFunc)>0)
-        elif isFileLine(line):
+        elif isFileLine_regex.match(line) and line.count(':') == 1:
             curDiscirminator = 1
             pure_line = line
             if discriminatorFlag in line:
                 curDiscirminator = int(re.findall(f'\({discriminatorFlag}\s*(\d+)\)', line)[0])
                 pure_line = re.sub(f'\s*\({discriminatorFlag}\s*(\d+)\)','',line)
-            curFile, lineNo = pure_line.split(":")
+            try:
+                curFile, lineNo = pure_line.split(":")
+            except ValueError:
+                print(f"line {line}\npure_line {pure_line}")
+                exit(0)
             curFile = os.path.abspath(curFile)
             if curFile == "" or lineNo == "":
                 # print("lack file info at first or bad output format", file=sys.stderr)
                 continue
             lineNo = int(lineNo)
-        elif isRealFunc(line):
-            curRealFunc = isRealFunc(line).group(1)
+        elif isRealFunc_regex.match(line) and isRealFunc_regex.match(line).span()[1] == len(line):
+            curRealFunc = isRealFunc_regex.match(line).group(1)
             if ".plt" in curRealFunc or "@plt" in curRealFunc:
                 isValidFunc = False
             else:
@@ -380,21 +399,21 @@ def parse_Objdump(elf_path:str, allFunc:set[str]) -> dict[int, tuple[str, int, i
             assert(len(curRealFunc)>0)
         else:
             
-            if not isValidFunc:
+            if not all ([c in hexChars for c in line]):
+                print("unrecognized line: " + line, file=sys.stderr)
                 continue
 
-            if not all ([c in hexChars for c in line]):
-                # print("lack file info at first or bad output format", file=sys.stderr)
+            if not isValidFunc:
                 continue
 
             curAddr = int(line, 16)
             
             funcExist = curFunc!=""
-            for func in allFunc:
-                if curFunc in func:
-                    # why `in`? some function may be appended with postfix like 'part', 'isra'
-                    funcExist = True
-                    break
+            # for func in allFunc:
+            #     if curFunc in func:
+            #         # why `in`? some function may be appended with postfix like 'part', 'isra'
+            #         funcExist = True
+            #         break
             '''
             many of disassembly belong to inline funcs from other files (.h e.g.), and now I
             try to avoid them, this may cause no fn because the var-use I care basically
