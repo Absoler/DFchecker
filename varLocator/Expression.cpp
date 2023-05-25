@@ -13,27 +13,24 @@ Expression Expression::createEmpty(){
 
 Expression::Expression(){
     memset(reg_scale, 0, sizeof(reg_scale));
-    val = 0;
-    sign = false;
+    offset = 0;
     valid = true;
 }
 
 Expression::Expression(Dwarf_Unsigned _val_u){
     memset(reg_scale, 0, sizeof(reg_scale));
-    val = _val_u;
-    sign = false;
+    offset = _val_u;
     valid = true;
 }
 
 Expression::Expression(Dwarf_Signed _val_s){
     memset(reg_scale, 0, sizeof(reg_scale));
-    val = (Dwarf_Unsigned)_val_s;
+    offset = (Dwarf_Unsigned)_val_s;
     valid = true;
-    sign = true;
 }
 
 bool Expression::equal(const Expression &other){
-    bool res = val == other.val;
+    bool res = offset == other.offset;
     for(int i=0; i<REG_END; ++i){
         if(reg_scale[i]!=other.reg_scale[i]){
             res = false;
@@ -57,12 +54,14 @@ bool Expression::valid_bin_op(const Expression &exp1, const Expression &exp2, Dw
         
     }else if(op==DW_OP_div){
         res = exp1.no_reg();
+        res &= (exp1.offset != 0);
 
     }else if(op==DW_OP_minus){
 
      
     }else if(op==DW_OP_mod){
         res = exp1.no_reg();
+        res &= (exp1.offset != 0);
        
     }else if(op==DW_OP_mul){
         res = exp1.no_reg() || exp2.no_reg();
@@ -103,81 +102,82 @@ Expression Expression::bin_op(const Expression &exp1, const Expression &exp2, Dw
     }
     if(op == DW_OP_plus){
         
-        res.val += exp2.val;
+        res.offset += exp2.offset;
         for(int i=0; i<REG_END; ++i){
             res.reg_scale[i] += exp2.reg_scale[i];
         }
         
     }else if(op==DW_OP_div){
         
-        Dwarf_Signed divisor = (Dwarf_Signed)res.val;
-        res.val = (Dwarf_Signed)exp2.val / divisor ; 
+        Dwarf_Signed divisor = (Dwarf_Signed)res.offset;
+
+        res.offset = (Dwarf_Signed)exp2.offset / divisor ; 
         for(int i=0; i<REG_END; ++i){
             res.reg_scale[i] = (Dwarf_Signed)exp2.reg_scale[i] / divisor;
         }
     }else if(op==DW_OP_minus){
 
-        res.val -= exp2.val;
+        res.offset -= exp2.offset;
         for(int i=0; i<REG_END; ++i){
             res.reg_scale[i] -= exp2.reg_scale[i];
         }
     }else if(op==DW_OP_mod){
 
         for(int i=0; i<REG_END; ++i){
-            res.reg_scale[i] = exp2.reg_scale[i] % res.val;
+            res.reg_scale[i] = exp2.reg_scale[i] % res.offset;
         }
-        res.val = exp2.val % res.val;
+        res.offset = exp2.offset % res.offset;
 
     }else if(op==DW_OP_mul){
 
         if(res.no_reg()){
             for (int i=0; i<REG_END; ++i) {
-                res.reg_scale[i] = res.val * exp2.reg_scale[i];       
+                res.reg_scale[i] = res.offset * exp2.reg_scale[i];       
             }
         }else{
             for (int i=0; i<REG_END; ++i) {
-                res.reg_scale[i] = exp2.val * res.reg_scale[i];       
+                res.reg_scale[i] = exp2.offset * res.reg_scale[i];       
             }
         }
-        res.val = res.val * exp2.val;
+        res.offset = res.offset * exp2.offset;
         
     }else if(op==DW_OP_or){
 
         // must no reg
-        res.val |= exp2.val;
+        res.offset |= exp2.offset;
     }else if(op==DW_OP_and){
 
-        res.val &= exp2.val;
+        res.offset &= exp2.offset;
     }else if(op==DW_OP_shl){
 
-        res.val = exp2.val << res.val;
+        res.offset = exp2.offset << res.offset;
     }else if(op==DW_OP_shr){
 
-        res.val = exp2.val >> res.val;
+        res.offset = exp2.offset >> res.offset;
     }else if(op==DW_OP_shra){
 
-        res.val = (Dwarf_Signed)exp2.val >> res.val;
+        res.offset = (Dwarf_Signed)exp2.offset >> res.offset;
     }else if(op==DW_OP_xor){
 
-        res.val ^= exp2.val;
+        res.offset ^= exp2.offset;
     }else if(op==DW_OP_eq){
 
-        res.val = (res.val==exp2.val?1:0);
+        res.offset = (res.offset==exp2.offset?1:0);
     }else if(op==DW_OP_ge){
         
-        res.val = (exp2.val>=res.val?1:0);
+        res.offset = (exp2.offset>=res.offset?1:0);
     }else if(op==DW_OP_gt){
         
-        res.val = (exp2.val>res.val?1:0);
+        res.offset = (exp2.offset>res.offset?1:0);
     }else if(op==DW_OP_le){
         
-        res.val = (exp2.val<=res.val?1:0);
+        res.offset = (exp2.offset<=res.offset?1:0);
     }else if(op==DW_OP_lt){
         
-        res.val = (exp2.val<res.val);
+        res.offset = (exp2.offset<res.offset);
     }else if(op==DW_OP_ne){
 
-        res.val = (exp2.val!=res.val?1:0);
+        res.offset = (exp2.offset!=res.offset?1:0);
     }
 
     return res;
@@ -192,14 +192,14 @@ Expression Expression::unary_op(const Expression &exp, Dwarf_Small op){
     }
 
     if (op==DW_OP_neg) {
-        res.val = -((Dwarf_Signed)res.val);
+        res.offset = -((Dwarf_Signed)res.offset);
         for(int i=0; i<REG_END; ++i){
             res.reg_scale[i] = -res.reg_scale[i];
         }
     }else if(op==DW_OP_abs){
-        res.val = std::abs((Dwarf_Signed)res.val);
+        res.offset = std::abs((Dwarf_Signed)res.offset);
     }else if(op==DW_OP_not){
-        res.val = ~res.val;
+        res.offset = ~res.offset;
     }
 
     return res;
@@ -221,13 +221,12 @@ bool Expression::valid_unary_op(const Expression &exp, Dwarf_Small op){
 
 void Expression::reset(){
     valid = true;
-    sign = false;
     memset(reg_scale, 0, sizeof(reg_scale));
-    val = 0;
+    offset = 0;
 }
 
 void Expression::output(){
-    printf("%llu", val);
+    printf("%llx", offset);
     for(int i=0; i<REG_END; ++i){
         if(reg_scale[i]){
             printf(" + %lld * %s", reg_scale[i], reg_names[i]);
@@ -237,10 +236,10 @@ void Expression::output(){
 }
 
 void Expression::setExpFrom(const Expression &exp){
+    empty = exp.empty;
     valid = exp.valid;
-    sign = exp.valid;
     memcpy(reg_scale, exp.reg_scale, sizeof(reg_scale));
-    val = exp.val;
+    offset = exp.offset;
 }
 
 const char *reg_names[REG_END] = {

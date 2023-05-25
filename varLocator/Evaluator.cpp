@@ -198,7 +198,7 @@ int Evaluator::exec_operation(Dwarf_Small op, Dwarf_Unsigned op1, Dwarf_Unsigned
     {
         Expression reg_off;
         reg_off.reg_scale[op-DW_OP_breg0] = 1;
-        reg_off.val = op1;
+        reg_off.offset = op1;
         stk.push(reg_off);
         break;
     }
@@ -210,7 +210,7 @@ int Evaluator::exec_operation(Dwarf_Small op, Dwarf_Unsigned op1, Dwarf_Unsigned
     {
         Expression reg_off;
         reg_off.reg_scale[op1] = 1;
-        reg_off.val = op2;
+        reg_off.offset = op2;
         stk.push(reg_off);
         break;
     }
@@ -258,6 +258,9 @@ int Evaluator::exec_operation(Dwarf_Small op, Dwarf_Unsigned op1, Dwarf_Unsigned
             reinterpret the bits
         */
         break;
+    default:
+        fprintf(stderr, "unknown op %u", op);
+        ret = op;
     }
         
     return ret;
@@ -313,15 +316,20 @@ Address Evaluator::read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form){
             return res;
         }
 
-        AddressExp addr;
+        AddressExp addrExp;
+        
+        if(loclist_expr_op_count == 0){
+            addrExp.empty = true;
+        }
+        
         init_stack();
 
         if(!debug_addr_unavailable){
-            addr.startpc = lopc;
-            addr.endpc = hipc;
+            addrExp.startpc = lopc;
+            addrExp.endpc = hipc;
         }else{
-            addr.startpc = raw_lopc;
-            addr.endpc = raw_hipc;
+            addrExp.startpc = raw_lopc;
+            addrExp.endpc = raw_hipc;
         }
 
         Dwarf_Small op = 0;
@@ -339,41 +347,45 @@ Address Evaluator::read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form){
 
             if((op>=DW_OP_reg0&&op<=DW_OP_reg31) || op==DW_OP_regx){
                 // reg addressing
-                addr.type = REGISTER;
-                addr.reg = (op==DW_OP_regx? op1 : op-DW_OP_reg0);
+                addrExp.type = REGISTER;
+                addrExp.reg = (op==DW_OP_regx? op1 : op-DW_OP_reg0);
 
                 no_end = false;
             }
             else if(op==DW_OP_implicit_value || op==DW_OP_stack_value){
                 // immediate addressing
-                addr.type = CONSTANT;
+                addrExp.type = CONSTANT;
                 if(op==DW_OP_implicit_value){
                     if(op1>8){
                         // how to deal with LEB128 coding with size > 8?
                     }
 
-                    addr.const_val = Expression(op2);
+                    addrExp.offset = op2;
                     
                 }else if(op==DW_OP_stack_value){
-
-                    addr.const_val = stk.top();
+                    if(stk.empty()){
+                        addrExp.valid = false;
+                        fprintf(stderr, "stack empty meeting DW_OP_stack_value");
+                    }else
+                        addrExp.setExpFrom(stk.top());
 
                 }
                 no_end = false;
             }else if(op==DW_OP_piece){
 
                 // deal with piece case
-                addr.piece = std::pair<Dwarf_Unsigned, int>(piece_base, op1);
-                if(addr.type == MEMORY){
+                addrExp.piece = std::pair<Dwarf_Unsigned, int>(piece_base, op1);
+                if(addrExp.type != REGISTER && addrExp.type != CONSTANT){
                     if(stk.empty()){
-                        addr.setExpFrom(Expression::createEmpty());
+                        addrExp.setExpFrom(Expression::createEmpty());
                     }else{
-                        addr.setExpFrom(stk.top());
+                        addrExp.setExpFrom(stk.top());
                     }
                 }
-                res.addrs.push_back(addr);
-                addr.reset();
+                res.addrs.push_back(addrExp);
+                addrExp.reset();
                 no_end = false;
+                piece_base += op1;
             }else{
 
                 // indirect addressing
@@ -381,8 +393,8 @@ Address Evaluator::read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form){
                 if(ret!=0){
                     const char *op_name;
                     dwarf_get_OP_name(op, &op_name);
-                    fprintf(stderr, "parse expression wrong at %s", op_name);
-                    addr.valid = false;
+                    fprintf(stderr, "parse expression wrong at %s\n", op_name);
+                    addrExp.valid = false;
                     break;
                 }
                 no_end = true;
@@ -393,13 +405,13 @@ Address Evaluator::read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form){
 
         if(no_end){
             if(stk.empty()){
-                addr.setExpFrom(Expression::createEmpty());
+                addrExp.setExpFrom(Expression::createEmpty());
             }else{
-                addr.setExpFrom(stk.top());
+                addrExp.setExpFrom(stk.top());
             }
         }
 
-        res.addrs.push_back(addr);
+        res.addrs.push_back(addrExp);
 
 
     }

@@ -11,7 +11,6 @@ void AddressExp::reset(){
     Expression::reset();
     type = MEMORY;
     reg = REG_END;
-    const_val = Expression();
 }
 
 
@@ -21,18 +20,16 @@ void AddressExp::output(){
     if(type==MEMORY){
         Expression::output();
     }else if(type==REGISTER){
-        const char* reg_name;
-        dwarf_get_FRAME_name(reg, &reg_name);
 
-        printf("%s\n", reg_name);
+        printf("%s\n", reg_names[reg]);
     }else{
-        const_val.output();
+        Expression::output();
     }
 }
 
 void Address::output(){
     printf("\n");
-    printf("%s\n", name.c_str());
+    printf("address %s\n", name.c_str());
     for(AddressExp addr: addrs){
         addr.output();
     }

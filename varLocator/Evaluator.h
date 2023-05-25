@@ -16,4 +16,6 @@ class Evaluator{
 
     Address read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form);
 
+    Dwarf_Die getTypeDie();
+
 };

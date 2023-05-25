@@ -3,6 +3,9 @@
 #include <libdwarf-0/dwarf.h>
 #include <libdwarf-0/libdwarf.h>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 #define REG_END 128
 extern const char *reg_names[REG_END] ;
 
@@ -30,11 +33,11 @@ class Expression{
         the value of `Expression` is val + reg0 * reg_scale[0] + reg1 * ...
     */
     Dwarf_Signed reg_scale[REG_END];
-    Dwarf_Unsigned val;
+    Dwarf_Unsigned offset;
     
-    bool sign = false;
     bool no_reg() const;
-
+    friend json createJsonforExpression(const Expression &exp);
+    
     void reset();
     void output();
     void setExpFrom(const Expression &);

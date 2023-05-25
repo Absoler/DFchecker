@@ -1,7 +1,7 @@
 
 
-CXX = g++-12.1 
-LD = g++-12.1
+CXX = g++
+LD = g++
 
 SRCS = $(wildcard *.cpp)
 
@@ -22,8 +22,8 @@ $(TARGET): $(OBJS)
 	$(LD) -o $@ $^ -ldwarf
 
 # 上一句目标文件依赖一大堆.o文件，这句表示所有.o都由相应名字的.c文件自动生成
-%.o:%.c
-	$(CC) -c $^ $(CXXFLAGS)
+%.o:%.cpp
+	$(CXX) -c $^ $(CXXFLAGS) -I./thirdparty/nlohmann
 
 # make clean删除所有.o和目标文件
 clean:

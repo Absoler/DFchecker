@@ -1,4 +1,5 @@
-#include <cstddef>
+#include <fstream>
+#include <iostream>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -8,11 +9,24 @@
 #include "Address.h"
 #include "Evaluator.h"
 
+#include "jsonUtil.h"
+
 #define simple_handle_err(res) do{ \
     if(res!=DW_DLV_OK){ \
         return res; \
     } \
 }while(0);
+
+using namespace std;
+
+// global options
+string oFileStr;
+int useJson = 1;
+bool printRawLoc = false;
+
+// important variables
+json allJson = json::array();
+
 inline void printindent(int indent){
     for(int _=0;_<indent;++_)
         printf("\t");
@@ -92,8 +106,26 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die var_die){
     char *name = NULL;
     res = get_name(dbg, var_die, &name);
     simple_handle_err(res)
-    addr.name = std::string(name);
-    addr.output();
+    if(name)
+        addr.name = std::string(name);
+    
+    if(useJson){
+    // addr.output();
+        json addrJson = createJsonforAddress(addr);
+        allJson.push_back(move(addrJson));
+        // auto addrStr = addrJson.dump(4);
+        // if (oFileStr!="") {
+        //     fstream out(oFileStr.c_str(), ios::app);
+        //     out << addrStr <<endl;
+        //     out.close();
+        // }else{
+        //     cout << addrStr << endl;
+        // }
+        
+    }else{
+        addr.output();
+    }
+    
     return 0;
 }
 
@@ -213,10 +245,14 @@ void walkDieTree(Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
                     res = dwarf_get_FORM_name(form, &form_name);
                     if(res == DW_DLV_OK){
                         printf(" %s", form_name);
-                        fprintf(stderr, "%s\n", form_name);
+                        // fprintf(stderr, "%s\n", form_name);
                     }
-                    // processLocation(location_attr, form, indent);
-                    test_evaluator(dbg, fa_die);
+                    
+                    if(printRawLoc){
+                        processLocation(location_attr, form, indent);
+                    }else{
+                        test_evaluator(dbg, fa_die);
+                    }
                 }
             }
 
@@ -238,6 +274,18 @@ int main(int argc, char *argv[]) {
     if (fd < 0) {
         perror("open");
         return 1;
+    }
+
+    for(int i=2; i<argc; ++i){
+        if (strcmp(argv[i], "-o")==0 ||
+            strcmp(argv[i], "--output") == 0) {
+                oFileStr = string(argv[i+1]);
+        }else if (strcmp(argv[i], "-nj") == 0) {
+            useJson = 0;
+        }else if (strcmp(argv[i], "-r") == 0 ||
+                strcmp(argv[i], "--raw") == 0){
+            printRawLoc = true;
+        }
     }
 
     /*
@@ -264,11 +312,12 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (res==DW_DLV_NO_ENTRY){
+            break;
             if(is_info){
                 is_info = false;
                 continue;
             }
-            return 1;
+            // return 1;
         }
         printf("cu_header_length:%llu\nnext_cu_header:%llu\n", cu_header_length, next_cu_header);
 
@@ -285,6 +334,19 @@ int main(int argc, char *argv[]) {
     }
     dwarf_finish(dbg);
     close(fd);
+
+    // output json result
+    if(useJson){
+        string jsonStr = allJson.dump(4);
+        if (oFileStr!="") {
+            fstream out(oFileStr.c_str(), ios::out);
+            out << jsonStr << endl;
+            out.close();
+        }else{
+            cout << jsonStr << endl;
+        }
+        
+    }
 
     return 0;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Expression.h"
+#include "jsonUtil.h"
 #include <libdwarf-0/dwarf.h>
 #include <libdwarf-0/libdwarf.h>
 #include <string>
@@ -20,20 +21,20 @@ class AddressExp : public Expression{
     public:
     AddressExp() = default;
     AddressExp(AddrType _type);
-    void reset();
+    
+    /*
+        in dwarf standard, pieces belong to the same location expression,
+        however I take each piece into an addrExp seperately, because each
+        piece may have different `type`.
+    */
     piece_type piece;
-
-    AddrType type;
- 
-    // valid if type == REGISTER
-    Dwarf_Half reg;
-
-    // valid if type == CONSTANT
-    Expression const_val;
-
+    AddrType type = MEMORY; // if type == MEMORY or type == CONSTANT, use Expression of the father
+    Dwarf_Half reg = REG_END; // valid if type == REGISTER
     Dwarf_Addr startpc, endpc;  // not realize more complex range
 
+    void reset();
     void output();
+    friend json createJsonforAddressExp(const AddressExp &addrexp);
 };
 
 /*
@@ -46,14 +47,11 @@ class Address{
     Address(AddrType _type);
 
     bool valid = false;
-    
-    
     std::string name;
-    
     std::vector<AddressExp> addrs;
-    int piece_num = 0;
 
     
     void output();
     void update_valid();
+    friend json createJsonforAddress(const Address &addr);
 };
