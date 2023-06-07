@@ -26,9 +26,9 @@ int Evaluator::exec_operation(Dwarf_Small op, Dwarf_Unsigned op1, Dwarf_Unsigned
     case DW_OP_addr:
         stk.push(std::move(Expression(op1)));
         break;
-    case DW_OP_deref:
-        ret = DW_OP_deref;
-        break;
+    
+    no_handle(DW_OP_deref)
+
     case DW_OP_const1u:
     case DW_OP_const2u:
     case DW_OP_const4u:
@@ -403,7 +403,7 @@ Address Evaluator::read_location(Dwarf_Attribute loc_attr, Dwarf_Half loc_form){
             
         }
 
-        if(no_end){
+        if(no_end && addrExp.valid){
             if(stk.empty()){
                 addrExp.setExpFrom(Expression::createEmpty());
             }else{

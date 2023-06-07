@@ -12,6 +12,9 @@ class AddressExp;
             <AddressExp>
         ]
         "name" : <string>
+        "decl_file" : <string>
+        "decl_row"  : <Dwarf_Unsigned>
+        "decl_col"  : <Dwarf_Unsigned>
         "piece_num" : <int>
         "valid" : <bool>
     }
@@ -28,10 +31,8 @@ json createJsonforAddress(const Address& addr);
         "startpc" : <Dwarf_Addr>
         "endpc" : <Dwarf_Addr>
         "reg" : <Dwarf_Half>
-        "piece" : {
-            "piece_start" : <Dwarf_Addr>,
-            "piece_size" : <int>
-        }
+        "piece_start" : <Dwarf_Addr>,
+        "piece_size" : <int>
     }
 */
 json createJsonforAddressExp(const AddressExp& addrexp);
@@ -39,12 +40,9 @@ json createJsonforAddressExp(const AddressExp& addrexp);
 /*
     {
         "offset" : <Dwarf_Unsigned>
-        "regs" : [
-            {
-                "reg_ind" : <int>,
-                "scale" : <int>
-            }
-        ]
+        "regs" : {
+            <int>(reg_ind) : <int>(scale),
+        }
         "valid" : <bool>
         "empty" : <bool>
     }

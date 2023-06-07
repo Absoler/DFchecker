@@ -3,19 +3,13 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
-#include <unistd.h>
 #include <libdwarf-0/dwarf.h>
 #include <libdwarf-0/libdwarf.h>
-#include "Address.h"
-#include "Evaluator.h"
+#include <unistd.h>
 
-#include "jsonUtil.h"
+#include "varLocator.h"
 
-#define simple_handle_err(res) do{ \
-    if(res!=DW_DLV_OK){ \
-        return res; \
-    } \
-}while(0);
+
 
 using namespace std;
 
@@ -34,7 +28,7 @@ inline void printindent(int indent){
 
 int get_name(Dwarf_Debug dbg, Dwarf_Die die, char **name){
     Dwarf_Error err;
-    int ret = 0, res;
+    int res;
     Dwarf_Bool has_name = false, has_origin = false;
     res = dwarf_hasattr(die, DW_AT_name, &has_name, &err);
     res = dwarf_hasattr(die, DW_AT_abstract_origin, &has_origin, &err);
@@ -76,6 +70,12 @@ int get_name(Dwarf_Debug dbg, Dwarf_Die die, char **name){
 
         Dwarf_Attribute name_attr;
         Dwarf_Half name_form;
+
+        Dwarf_Bool has_name = true;
+        res = dwarf_hasattr(origin_die, DW_AT_name, &has_name, &err);
+        if(!has_name){
+            return 1;
+        }
         dwarf_attr(origin_die, DW_AT_name, &name_attr, &err);
         if(res == DW_DLV_OK){
             dwarf_whatform(name_attr, &name_form, &err);
@@ -85,10 +85,10 @@ int get_name(Dwarf_Debug dbg, Dwarf_Die die, char **name){
             }
         }
     }
-    return ret;
+    return 0;
 }
 
-int test_evaluator(Dwarf_Debug dbg, Dwarf_Die var_die){
+int test_evaluator(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die){
     int res;
     Dwarf_Error err;
     Dwarf_Attribute location_attr;
@@ -103,12 +103,20 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die var_die){
     if(addr.valid == false){
         return 1;
     }
+
     char *name = NULL;
     res = get_name(dbg, var_die, &name);
     simple_handle_err(res)
     if(name)
-        addr.name = std::string(name);
+        addr.name = string(name);
     
+    char *file_name = NULL;
+    Dwarf_Unsigned decl_row = -1, decl_col = -1;
+    res = test_declPos(dbg, cu_die, var_die, &file_name, &decl_row, &decl_col, 0);
+    if(file_name) addr.decl_file = string(file_name);
+    addr.decl_row = decl_row;
+    addr.decl_col = decl_col;
+
     if(useJson){
     // addr.output();
         json addrJson = createJsonforAddress(addr);
@@ -127,6 +135,86 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die var_die){
     }
     
     return 0;
+}
+
+int test_declPos(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die, 
+            char **decl_file_name, Dwarf_Unsigned *decl_row, Dwarf_Unsigned *decl_col, int indent)
+{
+    Dwarf_Error err;
+    int res = 0;
+
+    Dwarf_Bool has_decl_file;
+    res = dwarf_hasattr(var_die, DW_AT_decl_file, &has_decl_file, &err);
+    simple_handle_err(res)
+    if(!has_decl_file){
+        Dwarf_Bool has_origin;
+        res = dwarf_hasattr(var_die, DW_AT_abstract_origin, &has_origin, &err);
+        simple_handle_err(res)
+        if(!has_origin){
+            return 1;
+        }
+
+        Dwarf_Attribute off_attr;
+        // Dwarf_Half off_form;
+        res = dwarf_attr(var_die, DW_AT_abstract_origin, &off_attr, &err);
+        simple_handle_err(res)
+
+        // res = dwarf_whatform(off_attr, &off_form, &err);
+        // simple_handle_err(res)
+
+        Dwarf_Off offset;
+        Dwarf_Bool is_info;
+        res = dwarf_global_formref_b(off_attr, &offset, &is_info, &err);
+        simple_handle_err(res)
+
+        Dwarf_Die origin_die;
+        res = dwarf_offdie_b(dbg, offset, is_info, &origin_die, &err);
+        var_die = origin_die;
+    }
+    
+    // get file name
+    Dwarf_Attribute decl_file_attr;
+    res = dwarf_attr(var_die, DW_AT_decl_file, &decl_file_attr, &err);
+    simple_handle_err(res)
+
+    Dwarf_Unsigned decl_file;
+    res = dwarf_formudata(decl_file_attr, &decl_file, &err);
+    simple_handle_err(res)
+
+    char **filenames;
+    Dwarf_Signed count;
+    res = dwarf_srcfiles(cu_die, &filenames, &count, &err);
+    simple_handle_err(res);
+
+    (*decl_file_name) = filenames[decl_file-1];
+    // printindent(indent);
+    // printf("%lld %llu %s\n", count, decl_file, filenames[decl_file-1]);
+    
+    // get decl row and col
+    Dwarf_Attribute decl_row_attr, decl_col_attr;
+    Dwarf_Bool has_row = true;
+    res = dwarf_hasattr(var_die, DW_AT_decl_line, &has_row, &err);
+    if(has_row){
+        res = dwarf_attr(var_die, DW_AT_decl_line, &decl_row_attr, &err);
+        simple_handle_err(res)
+
+        res = dwarf_formudata(decl_row_attr, decl_row, &err);
+        simple_handle_err(res)
+    }
+
+    Dwarf_Bool has_col = true;
+    res = dwarf_hasattr(var_die, DW_AT_decl_column, &has_col, &err);
+    simple_handle_err(res)
+    if(has_col){
+        res = dwarf_attr(var_die, DW_AT_decl_column, &decl_col_attr, &err);
+        simple_handle_err(res)
+
+        res = dwarf_formudata(decl_col_attr, decl_col, &err);
+        simple_handle_err(res)
+    }
+
+
+    return DW_DLV_OK;
 }
 
 int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
@@ -172,7 +260,7 @@ int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
                 Dwarf_Small op = 0;
                 int opres;
                 printf("\n");
-                printindent(indent+1);
+                printindent(indent);
                 printf("--- exp start %llx %llx\n", lopc, hipc);
                 
                 for(Dwarf_Unsigned j = 0; j<loclist_expr_op_count; j++){
@@ -183,7 +271,7 @@ int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
                         const char *op_name;
                         res = dwarf_get_OP_name(op, &op_name);
                         // printf("\n");
-                        printindent(indent+1);
+                        printindent(indent);
                         printf("%s ", op_name);
                         printf(" %x %x %x\n", op1, op2, op3);
                     }
@@ -201,7 +289,8 @@ int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
 
     return ret;
 }
-void walkDieTree(Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
+
+void walkDieTree(Dwarf_Die cu_die, Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
     Dwarf_Error err;
     do{
         const char *tag_name;
@@ -219,24 +308,18 @@ void walkDieTree(Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
 
             if (tag==DW_TAG_variable||tag==DW_TAG_formal_parameter){
                 Dwarf_Bool hasLoc = false;
-                char *var_name;
-                Dwarf_Half name_form;
-                Dwarf_Attribute name_attr;
-                res = dwarf_attr(fa_die, DW_AT_name, &name_attr, &err);
+                char *var_name = nullptr;
+                res = get_name(dbg, fa_die, &var_name);
+                
                 if(res == DW_DLV_OK){
-                    dwarf_whatform(name_attr, &name_form, &err);
-                    if(name_form==DW_FORM_string||name_form==DW_FORM_line_strp||name_form==DW_FORM_strp){
-                        res = dwarf_formstring(name_attr, &var_name, &err);
-                        if(res == DW_DLV_OK){
-                            printf(" name: %s", var_name);
-                        }
-                    }
+                    printf(" name: %s", var_name);
                 }
 
                 res = dwarf_hasattr(fa_die, DW_AT_location, &hasLoc, &err);
                 
                 
                 if(res == DW_DLV_OK && hasLoc){
+
                     Dwarf_Attribute location_attr;
                     dwarf_attr(fa_die, DW_AT_location, &location_attr, &err);
                     Dwarf_Half form;
@@ -244,14 +327,15 @@ void walkDieTree(Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
                     const char *form_name;
                     res = dwarf_get_FORM_name(form, &form_name);
                     if(res == DW_DLV_OK){
-                        printf(" %s", form_name);
+                        printf(" %s\n", form_name);
                         // fprintf(stderr, "%s\n", form_name);
                     }
                     
                     if(printRawLoc){
-                        processLocation(location_attr, form, indent);
+                        
+                        processLocation(location_attr, form, indent+1);
                     }else{
-                        test_evaluator(dbg, fa_die);
+                        test_evaluator(dbg, cu_die, fa_die);
                     }
                 }
             }
@@ -260,7 +344,7 @@ void walkDieTree(Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_info, int indent){
         }
 
         if(dwarf_child(fa_die, &child_die, &err)==DW_DLV_OK){
-            walkDieTree(dbg, child_die, is_info, indent+1);
+            walkDieTree(cu_die, dbg, child_die, is_info, indent+1);
         }
         
     }while(dwarf_siblingof_b(dbg, fa_die, is_info, &fa_die, &err) == DW_DLV_OK);
@@ -326,7 +410,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        walkDieTree(dbg, cu_die, is_info, 0);
+        walkDieTree(cu_die, dbg, cu_die, is_info, 0);
 
         if(isFirstCu){
             isFirstCu = false;

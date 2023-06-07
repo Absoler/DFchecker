@@ -30,7 +30,7 @@ class AddressExp : public Expression{
     piece_type piece;
     AddrType type = MEMORY; // if type == MEMORY or type == CONSTANT, use Expression of the father
     Dwarf_Half reg = REG_END; // valid if type == REGISTER
-    Dwarf_Addr startpc, endpc;  // not realize more complex range
+    Dwarf_Addr startpc, endpc;  // endpc not include in range
 
     void reset();
     void output();
@@ -49,6 +49,8 @@ class Address{
     bool valid = false;
     std::string name;
     std::vector<AddressExp> addrs;
+    std::string decl_file;
+    Dwarf_Unsigned decl_row, decl_col;
 
     
     void output();
