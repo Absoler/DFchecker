@@ -11,6 +11,9 @@ import time
 import os
 import re
 import bisect
+from parse_expression import ExpParser, Access, AccessType
+from parse_mapping import VarMgr, Var
+from findType import findType
 
 normalCheck_mask = 0x1
 ifMultiCmp_mask = 0x2
@@ -44,6 +47,8 @@ code_to_str = create_enum_dict(Code)
 opKind_to_str = create_enum_dict(OpKind)
 
 all_insts = []  # all instructions, sorted
+expParser = ExpParser()
+varMgr = VarMgr()
 
 def hasMem(instr) -> bool:
     # lea inst doesn't access the memory
@@ -75,7 +80,7 @@ class SourceFile:
     '''
     guide info from `.json` file
     '''
-    def __init__ (self, name:str):
+    def __init__ (self, name:str, repo:str = ""):
         self.name = name
         
         '''
@@ -83,6 +88,12 @@ class SourceFile:
         [ [int ], [int ] .. ]   inner list's length may be 1 or 2
         '''
         self.lineGroups:list[list[int]] = []
+        self.exps:list[str] = []
+        self.vars:list[list[Access]] = []
+        ''' the 3 arrays have the same length
+        '''
+
+        self.types:set = findType(name, repo, use_cache=True)
 
     
     def __hash__(self) -> int:
@@ -112,16 +123,53 @@ class SourceFile:
 
             self.lineGroups.append(lineNum)
     
+    def set_line_and_vars(self, line_and_vars:list):
+        '''
+        input format
+        [
+            { 
+                "var" : <string>
+                "lineNo" : <string>
+            }
+        ]
+        '''
+        if len(line_and_vars) == 0:
+            return
+        for json_obj in line_and_vars:
+            lineNoStr = json_obj["lineNo"]
+            if len(lineNoStr) == 0:
+                print("lack info in json lineStr", file=sys.stderr)
+                continue
+            if " " in lineNoStr:
+                lineNum = [int(no) for no in lineNoStr.split()]
+            elif "-" in lineNoStr:
+                lineNum = [int(no) for no in lineNoStr.split('-')]
+            else:
+                lineNum = [int(lineNoStr)]
+
+            self.lineGroups.append(lineNum)
+
+            exp = json_obj["var"]
+            self.exps.append(exp)
+
+            res = expParser.parse(exp, types=self.types, show_exp=True)
+            if res is None:
+                print(f"no var in {exp} {self.name}", file=sys.stderr)
+                self.exps.pop()
+                self.lineGroups.pop()
+                continue
+            self.vars.append(res[1])
 
 
 srcs_mp:dict[str, SourceFile] = {} 
 
 class Result:
-    def __init__ (self, lineNo:int = -1, srcName:str = "", _inst_i:Instruction = None, _inst_j:Instruction = None):
+    def __init__ (self, lineNo:int = -1, srcName:str = "", _inst_i:Instruction = None, _inst_j:Instruction = None, varNames:list = []):
         self._lineNo = lineNo
         self._srcName = srcName
         self.inst_i = _inst_i
         self.inst_j = _inst_j
+        self.varNames = varNames
 
     def __hash__(self) -> int:
         return hash(self.inst_i) + hash(self.inst_j)
@@ -130,7 +178,8 @@ class Result:
         return self._lineNo == other._lineNo and\
             self._srcName == other._srcName and\
             self.inst_i == other.inst_i and\
-            self.inst_j == other.inst_j
+            self.inst_j == other.inst_j and\
+            self.varNames == other.varNames
 
     @property
     def lineNo(self):
@@ -151,7 +200,7 @@ class Result:
         return info
 
     def jsonMsg(self) -> str:
-        info = {f'{self._srcName}:{self._lineNo}' : [[f"{self.inst_i.ip:X}", f"{self.inst_i}"], [f"{self.inst_j.ip:X}", f"{self.inst_j}"]]}
+        info = {f'{self._srcName}:{self._lineNo}:{self.varNames}' : [[f"{self.inst_i.ip:X}", f"{self.inst_i}"], [f"{self.inst_j.ip:X}", f"{self.inst_j}"]]}
         return json.dumps(info)
     
     def __repr__(self) -> str:
@@ -243,7 +292,8 @@ class InstSet:
         return False
 
 
-    def conflict(self, other = None) -> list[Result]:
+    def conflict(self, other = None, var_list:list[Access] = []) -> list[Result]:
+        
         if other == None:
             other = self
         reses = []
@@ -252,10 +302,77 @@ class InstSet:
             for j, ins_j in enumerate(other.insts):
                 if i >= j:
                     continue
-                if not ins_i is ins_j and hasMem(ins_i) and hasMem(ins_j) and sameMem(ins_i, ins_j)\
+                if not ( (ins_i.ip != ins_j.ip) and hasMem(ins_i) and hasMem(ins_j) and sameMem(ins_i, ins_j)\
                     and len(factory.info(ins_i).used_memory()) > 0 and is_read(factory.info(ins_i).used_memory()[0])\
-                    and len(factory.info(ins_j).used_memory()) > 0 and is_read(factory.info(ins_j).used_memory()[0])\
-                    and (self!=other or self.discriminatorMap[ins_i.ip] == self.discriminatorMap[ins_j.ip])\
+                    and len(factory.info(ins_j).used_memory()) > 0 and is_read(factory.info(ins_j).used_memory()[0]) ):
+                    continue
+                
+
+                '''
+                    match the 3 following info
+                    "vars from expression parser" [src]
+                    "vars from debug info" [address] [src]
+                    to
+                    "current instruction" [address]
+                '''
+
+                # candidate vars from debug info
+                i_di_vars = list(varMgr.find(ins_i.ip))
+                j_di_vars = list(varMgr.find(ins_j.ip))
+
+                # filter out in-relevant debug info with info from expression parser
+    
+                i_di_vars = [di_var for di_var in i_di_vars if any(var.match(di_var.name) for var in var_list)]
+                j_di_vars = [di_var for di_var in j_di_vars if any(var.match(di_var.name) for var in var_list)]
+
+
+
+                # match instruction with debug info
+                
+                i_match = []
+                for di_var in i_di_vars:
+                    match_type = di_var.match(ins_i)
+                    if match_type == 0:
+                        continue
+                    src_vars:list[Access] = [var for var in var_list if var.match(di_var.name)]
+
+                    if match_type == 3:
+                        ''' di_var is a reg value, and the reg match ins.base or ins.index
+                            
+                            we hope di_var is a struct/union pointer or array
+                        '''
+                        
+                        for var in src_vars:
+                            if var.type == AccessType.array and var.name == di_var.name:
+                                i_match.append(var)
+                                continue
+
+                            p = var
+                            while p.container:
+                                p = p.container
+                                if p.name == di_var.name:
+                                    #! need field offset check
+                                    i_match.append(var.getName())
+                    
+                    elif match_type == 4:
+                        ''' di_var is a constant value, and match ins.offset
+
+                            if ins has no regs, so di_var is the address,
+                            so hope src_var is *di_var or di_var[]
+                        
+                        '''
+                        if ins_i.memory_base == Register.NONE and ins_i.memory_index == Register.NONE:
+                            for var in src_vars:
+                                if var.name == di_var.name and (var.type == AccessType.array or var.need_deref):
+                                    i_match.append(var.getName())
+                    
+                    elif match_type == 1:
+                        i_match.append(di_var.name)
+                
+                if len(i_match) == 0:
+                    continue
+
+                if  (self!=other or self.discriminatorMap[ins_i.ip] == self.discriminatorMap[ins_j.ip])\
                     and (self!=other or self.realFuncMap[ins_i.ip] == self.realFuncMap[ins_j.ip])\
                     and abs(ins_i.ip-ins_j.ip) < ip_offset\
                     and not self.breakByPush(ins_i, ins_j)  \
@@ -263,7 +380,7 @@ class InstSet:
                     and not self.flowElseWhere(ins_i, ins_j) \
                     and (not self.usingStack(ins_i) and (not self.usingStack(ins_j))) \
                     and (self != other or not self.regModified(i, j, self.insts)):
-                    res = Result(self.lineNo, self.srcName, ins_i, ins_j)
+                    res = Result(self.lineNo, self.srcName, ins_i, ins_j, i_match)
                     reses.append(res)
         return reses
     
@@ -447,11 +564,17 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
     useSimpleGuide:bool = args.useSimpleGuide
     showTime:bool = args.showTime
     showDisas:bool = args.showDisas
+    debugCache:str = args.debugCache
+    repo_path:str = args.repo
 
     # some important vars
     startTime = 0
     error = 2   # permissible lineNo error
     special_error = 10 # for special check, relax restrictions
+
+    if debugCache:
+        varMgr.load(debugCache)
+    
 
     # check type
     normalCheck = option & 0x1
@@ -466,7 +589,15 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
     '''
     process guide file from coccinelle's match result, the format is:
 
-    [ src_file:str, [ "lineNo" | "lineNo lineNo ..." ] ]
+    [
+        src_file<string>, 
+        [
+            { 
+                "var" : <string>
+                "lineNo" : <string>
+            }
+        ]
+    ]
     
     file should be the absolute path
     '''
@@ -482,19 +613,19 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
             for lineNo in open(checkGuide, "r+"):
                 if len(lineNo.strip()) == 0:
                     continue
-                inputLine = json.loads(lineNo)
-                assert(len(inputLine)==2)
+                json_line = json.loads(lineNo)
+                assert(len(json_line)==2)
                 
-                fileName = os.path.abspath(inputLine[0])
+                fileName = os.path.normpath(os.path.abspath(json_line[0]))
                 if fileName not in srcs_mp:
-                    srcs_mp[fileName] = SourceFile(fileName)
+                    srcs_mp[fileName] = SourceFile(fileName, repo=repo_path)
                 
-                srcs_mp[fileName].setLine(inputLine[1])
+                srcs_mp[fileName].set_line_and_vars(json_line[1])
         else:
             ''' must be single file test, may be relocatable file
             '''
             src_path = elf_path.replace(".o", "") + ".c"
-            srcs_mp[src_path] = SourceFile(src_path)
+            srcs_mp[src_path] = SourceFile(src_path, repo=repo_path)
             srcs_mp[src_path].setLine([checkGuide])
 
 
@@ -615,14 +746,14 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
     if normalCheck:
         for srcName in srcs_mp:
             src = srcs_mp[srcName]
-            for group in src.lineGroups:
+            for i,group in enumerate(src.lineGroups):
                 if len(group) == 1:
                     group = expand(group, err=3)
                     for lineNo in group:
                         if (srcName, lineNo) not in pos_instsMap:
                             continue
                         insts:InstSet = pos_instsMap[srcName, lineNo]
-                        curReses = insts.conflict()
+                        curReses = insts.conflict(var_list = src.vars[i])
                         for res in curReses:
                             normalReses.add(res)
 
@@ -871,6 +1002,8 @@ if __name__ == "__main__":
     parser.add_argument("--useSimpleGuide", "-sG", help="use nums joined by `-` to check only one file", action="store_true")
     parser.add_argument("--showTime", "-t", help="show time used in each part", action="store_true")
     parser.add_argument("--showDisas", "-d", help="show disassemble code", action="store_true")
+    parser.add_argument("--debugCache", "-dC", help="specify json produced by varLocator", default="", required=True)
+    parser.add_argument("--repo", "-r", help="specify analyzed repo path", required=True)
     args:argparse.Namespace = parser.parse_args()
     
     file = open(args.exe, "rb")
