@@ -4,13 +4,14 @@
 #include "jsonUtil.h"
 #include <libdwarf-0/dwarf.h>
 #include <libdwarf-0/libdwarf.h>
+#include <map>
 #include <string>
 #include <vector>
 
 enum AddrType{
     MEMORY,
     REGISTER,
-    CONSTANT
+    VALUE
 };
 
 // <piece_start, piece_size>
@@ -32,8 +33,15 @@ class AddressExp : public Expression{
     Dwarf_Half reg = REG_END; // valid if type == REGISTER
     Dwarf_Addr startpc, endpc;  // endpc not include in range
 
-    void reset();
+    bool needCFA = false;
+    // only valid when `DW_OP_fbreg` used, record cfa values between [startpc, endpc)
+    std::vector<AddressExp> cfa_values;
+    std::vector<Dwarf_Addr> cfa_pcs;
+
+    // no reset startpc and endpc now
+    void resetData();   
     void output();
+    std::string toString();
     friend json createJsonforAddressExp(const AddressExp &addrexp);
 };
 

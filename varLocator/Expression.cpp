@@ -1,9 +1,13 @@
 #include "Expression.h"
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <libdwarf-0/libdwarf.h>
+#include <string>
+
+using namespace std;
 
 Expression Expression::createEmpty(){
     Expression res;
@@ -11,32 +15,67 @@ Expression Expression::createEmpty(){
     return res;
 }
 
-Expression::Expression(){
-    memset(reg_scale, 0, sizeof(reg_scale));
-    offset = 0;
-    valid = true;
+Expression Expression::createCFA(){
+    Expression res;
+    res.isCFA = true;
+    return res;
 }
+
+Expression::Expression(){
+    reset();
+}
+
 
 Expression::Expression(Dwarf_Unsigned _val_u){
     memset(reg_scale, 0, sizeof(reg_scale));
     offset = _val_u;
+    mem = NULL;
     valid = true;
+
+    hasChild = false;
+    sub1 = NULL;
+    sub2 = NULL;
+    op = 0;
+
+    isCFA = false;
 }
 
 Expression::Expression(Dwarf_Signed _val_s){
     memset(reg_scale, 0, sizeof(reg_scale));
     offset = (Dwarf_Unsigned)_val_s;
+    mem = NULL;
     valid = true;
+
+    hasChild = false;
+    sub1 = NULL;
+    sub2 = NULL;
+    op = 0;
+
+    isCFA = false;
 }
 
 bool Expression::equal(const Expression &other){
     bool res = offset == other.offset;
+    res &= (mem == other.mem);
     for(int i=0; i<REG_END; ++i){
         if(reg_scale[i]!=other.reg_scale[i]){
             res = false;
             break;
         }
     }
+
+    res &= (hasChild == other.hasChild);
+    if(hasChild){
+        res &= (op == other.op);
+        if(sub1){
+            res &= (sub1->equal(*other.sub1));
+        }
+        if(sub2){
+            res &= (sub2->equal(*other.sub2));
+        }
+    }
+
+    res &= (isCFA == other.isCFA);
     return res;
 }
 
@@ -49,6 +88,7 @@ bool Expression::no_reg() const{
 
 bool Expression::valid_bin_op(const Expression &exp1, const Expression &exp2, Dwarf_Small op){
     bool res = true;
+
     if(op == DW_OP_plus){
         
         
@@ -86,6 +126,10 @@ bool Expression::valid_bin_op(const Expression &exp1, const Expression &exp2, Dw
         res = exp1.no_reg() && exp2.no_reg();
     }
 
+    if(exp1.isCFA || exp2.isCFA){
+        res = false;
+    }
+
     return res;
 }
 
@@ -97,7 +141,15 @@ Expression Expression::bin_op(const Expression &exp1, const Expression &exp2, Dw
     Expression res = exp1;
 
     if(!valid_bin_op(exp1, exp2, op)){
-        res.valid = false;
+        // expand to a binary tree
+        res.reset();
+        res.hasChild = true;
+        res.sub1 = std::make_shared<Expression>();
+        res.sub1->setExpFrom(exp1);
+        res.sub2 = std::make_shared<Expression>();
+        res.sub2->setExpFrom(exp2);
+        res.op = op;
+        
         return res;
     }
     if(op == DW_OP_plus){
@@ -116,7 +168,7 @@ Expression Expression::bin_op(const Expression &exp1, const Expression &exp2, Dw
             res.reg_scale[i] = (Dwarf_Signed)exp2.reg_scale[i] / divisor;
         }
     }else if(op==DW_OP_minus){
-
+        //! seems reverse?
         res.offset -= exp2.offset;
         for(int i=0; i<REG_END; ++i){
             res.reg_scale[i] -= exp2.reg_scale[i];
@@ -187,7 +239,11 @@ Expression Expression::unary_op(const Expression &exp, Dwarf_Small op){
 
     Expression res = exp;
     if(!valid_unary_op(exp, op)){
-        res.valid = false;
+        // expand to a binary tree with `sub2` is NULL
+        res.reset();
+        res.sub1 = std::make_shared<Expression>();
+        res.sub1->setExpFrom(exp);
+        res.op = op;
         return res;
     }
 
@@ -216,6 +272,8 @@ bool Expression::valid_unary_op(const Expression &exp, Dwarf_Small op){
         res = exp.no_reg();
     }
 
+    res = !exp.isCFA;
+
     return res;
 }
 
@@ -223,6 +281,14 @@ void Expression::reset(){
     valid = true;
     memset(reg_scale, 0, sizeof(reg_scale));
     offset = 0;
+    mem = NULL;
+
+    hasChild = false;
+    sub1 = NULL;
+    sub2 = NULL;
+    op = 0;
+
+    isCFA = false;
 }
 
 void Expression::output(){
@@ -240,6 +306,50 @@ void Expression::setExpFrom(const Expression &exp){
     valid = exp.valid;
     memcpy(reg_scale, exp.reg_scale, sizeof(reg_scale));
     offset = exp.offset;
+    mem = exp.mem;
+
+    hasChild = exp.hasChild;
+    sub1 = exp.sub1;
+    sub2 = exp.sub2;
+    op = exp.op;
+
+    isCFA = exp.isCFA;
+}
+
+string Expression::toString(){
+    string res("");
+    if(isCFA){
+        res = "cfa";
+        if(sign){
+            res += " + (" + to_string((Dwarf_Signed)offset) + ")";
+        }else{
+            res += " + " + to_string(offset);
+        }
+    }
+    else if(hasChild){
+        const char *op_name;
+        dwarf_get_OP_name(op, &op_name);
+        if(sub1 && sub2){
+            res += "(" + sub1->toString() + ") ";    
+            res += string(op_name);
+            res += " (" + sub2->toString() + ")";
+        }
+        else{
+            res += string(op_name);
+            res += " (" + sub1->toString() + ")";
+        }
+    }else{
+        if(offset) res += to_string(offset);
+        for (int i=0; i<REG_END; ++i) {
+            if(reg_scale[i]){
+                res += " +" + string(reg_names[i]) + "*" + to_string(reg_scale[i]);
+            }
+        }
+        if(mem){
+            res += " + *(" + mem->toString() + ")";
+        }
+    }
+    return res;
 }
 
 const char *reg_names[REG_END] = {

@@ -1,11 +1,14 @@
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
-#include <libdwarf-0/dwarf.h>
-#include <libdwarf-0/libdwarf.h>
+#include <stack>
+#include <string>
 #include <unistd.h>
+#include <vector>
+#include <queue>
 
 #include "varLocator.h"
 
@@ -14,9 +17,13 @@
 using namespace std;
 
 // global options
-string oFileStr;
+string jsonFileStr;
+string frameFileStr;
 int useJson = 1;
 bool printRawLoc = false;
+bool onlyComplex = false;
+bool printFDE = false;
+bool noTraverse = false;
 
 // important variables
 json allJson = json::array();
@@ -24,6 +31,23 @@ json allJson = json::array();
 inline void printindent(int indent){
     for(int _=0;_<indent;++_)
         printf("\t");
+}
+
+inline string addindent(int indent){
+    string res = "";
+    for(int _=0;_<indent;++_)
+        res += '\t';
+    return res;
+}
+
+template<typename T>
+string toHex(T v){
+    static const char* digits = "0123456789ABCDEF";
+    int size = sizeof(T)<<1;
+    string res(size, '0');
+    for (size_t i=0, j=(size-1)*4 ; i<size; ++i,j-=4)
+        res[i] = digits[(v>>j) & 0x0f];
+    return res;
 }
 
 int get_name(Dwarf_Debug dbg, Dwarf_Die die, char **name){
@@ -99,6 +123,7 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die){
     simple_handle_err(res)
 
     Evaluator evaluator;
+    evaluator.dbg = dbg;
     Address addr = evaluator.read_location(location_attr, loc_form);
     if(addr.valid == false){
         return 1;
@@ -121,6 +146,7 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die){
     // addr.output();
         json addrJson = createJsonforAddress(addr);
         allJson.push_back(move(addrJson));
+        
         // auto addrStr = addrJson.dump(4);
         // if (oFileStr!="") {
         //     fstream out(oFileStr.c_str(), ios::app);
@@ -133,6 +159,51 @@ int test_evaluator(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die){
     }else{
         addr.output();
     }
+
+    // dealloc memory
+    // for(AddressExp addrExp: addr.addrs){
+    //     stack<Expression*> ptrs;
+    //     queue<Expression*> que;
+    //     if(addrExp.mem){
+    //         // que.push(addrExp.mem);
+    //         // ptrs.push(addrExp.mem);
+    //         delete addrExp.mem;
+    //         addrExp.mem = NULL;
+    //     }
+    //     if(addrExp.hasChild && addrExp.sub1){
+    //         // que.push(addrExp.sub1);
+    //         // ptrs.push(addrExp.sub1);
+    //         delete addrExp.sub1;
+    //         addrExp.sub1 = NULL;
+    //     }
+    //     if(addrExp.hasChild && addrExp.sub2){
+    //         // que.push(addrExp.sub2);
+    //         // ptrs.push(addrExp.sub2);
+    //         delete addrExp.sub2;
+    //         addrExp.sub2 = NULL;
+    //     }
+    //     // while(!que.empty()){
+    //     //     Expression *ptr = que.front();
+    //     //     que.pop();
+    //     //     if(ptr->mem){
+    //     //         que.push(ptr->mem);
+    //     //         ptrs.push(ptr->mem);
+    //     //     }
+    //     //     if(ptr->hasChild && ptr->sub1){
+    //     //         que.push(ptr->sub1);
+    //     //         ptrs.push(ptr->sub1);
+    //     //     }
+    //     //     if(ptr->hasChild && ptr->sub2){
+    //     //         que.push(ptr->sub2);
+    //     //         ptrs.push(ptr->sub2);
+    //     //     }
+    //     // }
+    //     // while(!ptrs.empty()){
+    //     //     Expression *tmp = ptrs.top();
+    //     //     delete tmp;
+    //     //     ptrs.pop();
+    //     // }
+    // }
     
     return 0;
 }
@@ -212,12 +283,14 @@ int test_declPos(Dwarf_Debug dbg, Dwarf_Die cu_die, Dwarf_Die var_die,
         res = dwarf_formudata(decl_col_attr, decl_col, &err);
         simple_handle_err(res)
     }
-
+    dwarf_dealloc_attribute(decl_file_attr);
+    dwarf_dealloc_attribute(decl_row_attr);
+    dwarf_dealloc_attribute(decl_row_attr);
 
     return DW_DLV_OK;
 }
 
-int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
+int print_raw_location(Dwarf_Debug dbg, Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
     int ret = 0;
     int res = 0;
     Dwarf_Error err;
@@ -230,8 +303,11 @@ int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
         res = 1;
     else
         res = dwarf_get_loclist_c(loc_attr, &loclist_head, &locentry_len, &err);
-    printf(" %s", (res==DW_DLV_OK?" get success! ":" fail "));
+    // printf(" %s", (res==DW_DLV_OK?" get success! ":" fail "));
     if(res==DW_DLV_OK){
+        string ops_for_complexOnly;
+        bool isMultiLoc = true;
+        int bored_cnt = 0;
         for(Dwarf_Unsigned i = 0; i<locentry_len; i++){
             Dwarf_Small lkind=0, lle_value=0;
             Dwarf_Unsigned rawval1=0, rawval2=0;
@@ -255,29 +331,58 @@ int processLocation(Dwarf_Attribute loc_attr, Dwarf_Half loc_form, int indent){
             &locdesc_offset,
             &err);
 
+            bool isMultiExpr = true;
+            bool isBoredExpr = false;
             if(res==DW_DLV_OK){
                 // get entry successfully
                 Dwarf_Small op = 0;
                 int opres;
-                printf("\n");
-                printindent(indent);
-                printf("--- exp start %llx %llx\n", lopc, hipc);
-                
+                if(!onlyComplex){
+                    printf("\n");
+                    printindent(indent);
+                    printf("--- exp start %llx %llx\n", lopc, hipc);
+                }
+                if(loclist_expr_op_count==1){
+                    isMultiExpr = false;
+                }
+                if(lopc == hipc && loclist_expr_op_count>0){
+                    isBoredExpr = true;
+                }
+                ops_for_complexOnly += '\n' + addindent(indent) + "--- exp start " + toHex(lopc) + " " + toHex(hipc) + "\n";
                 for(Dwarf_Unsigned j = 0; j<loclist_expr_op_count; j++){
                     Dwarf_Unsigned op1, op2, op3, offsetForBranch;
-
+                    bool 
                     opres = dwarf_get_location_op_value_c(locdesc_entry, j, &op, &op1, &op2, &op3, &offsetForBranch, &err);
                     if(opres == DW_DLV_OK){
                         const char *op_name;
                         res = dwarf_get_OP_name(op, &op_name);
                         // printf("\n");
-                        printindent(indent);
-                        printf("%s ", op_name);
-                        printf(" %x %x %x\n", op1, op2, op3);
+                        if(!onlyComplex){
+                            printindent(indent);
+                            printf("%s ", op_name);
+                            printf(" %llx %llx %llx %llx\n", op1, op2, op3, offsetForBranch);
+                            if(op==DW_OP_entry_value||op==DW_OP_GNU_entry_value){
+                                tempEvaluator.dbg = dbg;
+                                tempEvaluator.parse_dwarf_block((Dwarf_Ptr)op2, op1, true);
+                            }
+                            if(op==DW_OP_fbreg){
+                                printf("DW_OP_fbreg_range %llu %llu\n", lopc, hipc);
+                            }
+                        }
+                        if(j==1 && loclist_expr_op_count == 2 && op == DW_OP_stack_value){
+                            isBoredExpr = true;
+                        }
+                        ops_for_complexOnly += addindent(indent) + string(op_name) + " " + toHex(op1) + " " + toHex(op2) + " " + toHex(op3) + "\n";
                     }
                 }
             }
-
+            isMultiLoc = isMultiLoc && isMultiExpr;
+            if(isBoredExpr){
+                bored_cnt++;
+            }
+        }
+        if(onlyComplex && isMultiLoc && bored_cnt < locentry_len){
+            cout<<ops_for_complexOnly<<endl;
         }
     }
     dwarf_dealloc_loc_head_c(loclist_head);
@@ -333,7 +438,7 @@ void walkDieTree(Dwarf_Die cu_die, Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_in
                     
                     if(printRawLoc){
                         
-                        processLocation(location_attr, form, indent+1);
+                        print_raw_location(dbg, location_attr, form, indent+1);
                     }else{
                         test_evaluator(dbg, cu_die, fa_die);
                     }
@@ -350,8 +455,6 @@ void walkDieTree(Dwarf_Die cu_die, Dwarf_Debug dbg, Dwarf_Die fa_die, bool is_in
     }while(dwarf_siblingof_b(dbg, fa_die, is_info, &fa_die, &err) == DW_DLV_OK);
 }
 
-
-
 int main(int argc, char *argv[]) {
     const char *progname = argv[1];
     int fd = open(progname, O_RDONLY);
@@ -363,12 +466,22 @@ int main(int argc, char *argv[]) {
     for(int i=2; i<argc; ++i){
         if (strcmp(argv[i], "-o")==0 ||
             strcmp(argv[i], "--output") == 0) {
-                oFileStr = string(argv[i+1]);
+                jsonFileStr = string(argv[i+1]);
+                ++i;
         }else if (strcmp(argv[i], "-nj") == 0) {
             useJson = 0;
         }else if (strcmp(argv[i], "-r") == 0 ||
                 strcmp(argv[i], "--raw") == 0){
             printRawLoc = true;
+        }else if (strcmp(argv[i], "-nc") == 0){
+            onlyComplex = true;
+        }else if (strcmp(argv[i], "-fde") == 0){
+            printFDE = true;
+        }else if(strcmp(argv[i], "-fo") == 0){
+            frameFileStr = string(argv[i+1]);
+            ++i;
+        }else if(strcmp(argv[i], "--no-traverse") == 0){
+            noTraverse = true;
         }
     }
 
@@ -384,12 +497,13 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "dwarf_init failed: %s\n", dwarf_errmsg(err));
         return 1;
     }
+    testFDE(dbg, printFDE);
 
     Dwarf_Die cu_die;
     bool is_info = true;
     int res = 0;
     bool isFirstCu = true;
-    while(1){
+    while(!noTraverse){
         res = dwarf_next_cu_header_d(dbg, is_info, &cu_header_length, &version_stamp, &abbrev_offset, &address_size, &length_size, &extension_size, 
             &type_signature, &typeoffset, &next_cu_header, &header_cu_type, &err);
         if (res==DW_DLV_ERROR){
@@ -403,6 +517,7 @@ int main(int argc, char *argv[]) {
             }
             // return 1;
         }
+        
         printf("cu_header_length:%llu\nnext_cu_header:%llu\n", cu_header_length, next_cu_header);
 
         if (dwarf_siblingof_b(dbg, NULL, is_info, &cu_die, &err) != DW_DLV_OK) {
@@ -422,8 +537,8 @@ int main(int argc, char *argv[]) {
     // output json result
     if(useJson){
         string jsonStr = allJson.dump(4);
-        if (oFileStr!="") {
-            fstream out(oFileStr.c_str(), ios::out);
+        if (jsonFileStr!="") {
+            fstream out(jsonFileStr.c_str(), ios::out);
             out << jsonStr << endl;
             out.close();
         }else{

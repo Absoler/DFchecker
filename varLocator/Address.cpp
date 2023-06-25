@@ -2,15 +2,21 @@
 #include "Expression.h"
 #include <cstdio>
 #include <libdwarf-0/libdwarf.h>
+#include <string>
+using namespace std;
 
 AddressExp::AddressExp(AddrType _type){
     type = _type;
 }
 
-void AddressExp::reset(){
+void AddressExp::resetData(){
     Expression::reset();
     type = MEMORY;
     reg = REG_END;
+
+    needCFA = false;
+    cfa_pcs.clear();
+    cfa_values.clear();
 }
 
 
@@ -25,6 +31,18 @@ void AddressExp::output(){
     }else{
         Expression::output();
     }
+}
+
+string AddressExp::toString(){
+    string res;
+    if(type==MEMORY){
+        res = "*(" + Expression::toString() + ")";
+    }else if(type == REGISTER){
+        res = string(reg_names[reg]);
+    }else{
+        res = Expression::toString();
+    }
+    return res;
 }
 
 void Address::output(){
