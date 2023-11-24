@@ -1,4 +1,4 @@
-#! /usr/bin/python3
+#! /usr/local/bin/python3
 import sys
 import argparse
 path_of_pyelftools = "/home/pyelftools/"
@@ -19,6 +19,7 @@ normalCheck_mask = 0x1
 ifMultiCmp_mask = 0x2
 ifRefresh_mask = 0x4
 
+useVarviewer = False
 permit_relocatable:bool = True
 is_relocatable:bool = False
 
@@ -92,8 +93,8 @@ class SourceFile:
         self.vars:list[list[Access]] = []
         ''' the 3 arrays have the same length
         '''
-
-        self.types:set = findType(name, repo, use_cache=True)
+        if useVarviewer:
+            self.types:set = findType(name, repo, use_cache=True)
 
     
     def __hash__(self) -> int:
@@ -151,6 +152,9 @@ class SourceFile:
 
             exp = json_obj["var"]
             self.exps.append(exp)
+
+            if not useVarviewer:
+                continue
 
             res = expParser.parse(exp, types=self.types, show_exp=True)
             if res is None:
@@ -558,14 +562,14 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
 
     # cmd control options
     elf_path:str = args.exe
-    checkGuide:str = args.guide
+    guide:str = args.guide
     option:int = args.option
     filterBy:str = args.filterBy
     useSimpleGuide:bool = args.useSimpleGuide
     showTime:bool = args.showTime
     showDisas:bool = args.showDisas
     debugCache:str = args.debugCache
-    repo_path:str = args.repo
+    repo:str = args.repo
 
     # some important vars
     startTime = 0
@@ -574,6 +578,8 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
 
     if debugCache:
         varMgr.load(debugCache)
+        global useVarviewer
+        useVarviewer = True
     
 
     # check type
@@ -581,10 +587,11 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
     need_checkIfMultiCmp = option & 0x2
     need_checkIfRefresh = option & 0x4
 
-    no_guide = (checkGuide == "noGuide")
+    no_guide = (guide == "")
     # only some modes support full scanning
     # only `one line` double fetch check
     assert( need_checkIfMultiCmp or normalCheck )
+    assert( useVarviewer or (not normalCheck))
 
     '''
     process guide file from coccinelle's match result, the format is:
@@ -610,7 +617,7 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
     '''
     if not no_guide:
         if not useSimpleGuide:
-            for lineNo in open(checkGuide, "r+"):
+            for lineNo in open(guide, "r+"):
                 if len(lineNo.strip()) == 0:
                     continue
                 json_line = json.loads(lineNo)
@@ -618,15 +625,15 @@ def check_loads(elf:ELFFile, args:argparse.Namespace):
                 
                 fileName = os.path.normpath(os.path.abspath(json_line[0]))
                 if fileName not in srcs_mp:
-                    srcs_mp[fileName] = SourceFile(fileName, repo=repo_path)
+                    srcs_mp[fileName] = SourceFile(fileName, repo=repo)
                 
                 srcs_mp[fileName].set_line_and_vars(json_line[1])
         else:
             ''' must be single file test, may be relocatable file
             '''
             src_path = elf_path.replace(".o", "") + ".c"
-            srcs_mp[src_path] = SourceFile(src_path, repo=repo_path)
-            srcs_mp[src_path].setLine([checkGuide])
+            srcs_mp[src_path] = SourceFile(src_path, repo=repo)
+            srcs_mp[src_path].setLine([guide])
 
 
     if showTime:
@@ -996,14 +1003,14 @@ def checkIfRefresh(index:int, insts:list, codeDict:dict, opKindDict:dict) -> boo
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", "-e", help="specify analyzed executable file", required=True, type=str)
-    parser.add_argument("--guide", "-g", help="specify guide file or nums joined by `-`", required=True)
+    parser.add_argument("--guide", "-g", help="specify guide file or nums joined by `-`", default="")
     parser.add_argument("--option", "-opt", help="analysis choice", default=1, type=int)
     parser.add_argument("--filterBy", "-fb", help="filter result use an existing result file, of single line json format", type=str)
     parser.add_argument("--useSimpleGuide", "-sG", help="use nums joined by `-` to check only one file", action="store_true")
     parser.add_argument("--showTime", "-t", help="show time used in each part", action="store_true")
     parser.add_argument("--showDisas", "-d", help="show disassemble code", action="store_true")
-    parser.add_argument("--debugCache", "-dC", help="specify json produced by varLocator", default="", required=True)
-    parser.add_argument("--repo", "-r", help="specify analyzed repo path", required=True)
+    parser.add_argument("--debugCache", "-dC", help="specify json produced by varLocator", default="")
+    parser.add_argument("--repo", "-r", help="specify analyzed repo path")
     args:argparse.Namespace = parser.parse_args()
     
     file = open(args.exe, "rb")

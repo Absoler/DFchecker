@@ -64,9 +64,7 @@ def is_use_memory(inst:Instruction):
         return False
     
     code_str:str = code_to_str[inst.code]
-    if code_str.startswith("CMP") or\
-        code_str.startswith("TEST") or\
-        code_str.startswith("CMOV"):
+    if code_str.startswith("CMOV"):
         return False
     
     return inst.op1_kind == OpKind.MEMORY
@@ -105,6 +103,71 @@ def find_clone_pair(insts:list[Instruction]) -> list[tuple[int, int]]:
 
     return ans
 
+
+def select_unvisit(clone_pairs:list[tuple[int, int]], visitpath:str):
+    ans = []
+
+    visitfile = open(visitpath, "r")
+    visit = json.load(visitfile)
+    for pair in clone_pairs:
+        if not list(pair) in visit:
+            ans.append(pair)
+    
+    visitfile.close()
+    return ans
+
+
+def save_visit(clone_pairs:list[tuple[int, int]], visitpath:str):
+    visitfile = open(visitpath, "w")
+    json.dump(clone_pairs, visitfile)
+    visitfile.close()
+
+def iswrite(opaccess:OpAccess):
+    return opaccess == OpAccess.WRITE or opaccess == OpAccess.COND_WRITE or\
+    opaccess == OpAccess.READ_WRITE or opaccess == OpAccess.READ_COND_WRITE
+
+def isrelevant(reg:Register, regs:list):
+    fullreg = RegisterExt.full_register(reg)
+    return fullreg in list(map(RegisterExt.full_register, regs))
+
+def select_valid_range(clone_pairs:list[tuple[int, int]], all_insts:list[Instruction]):
+    ''' between 2 fetches
+        1. no relevant register is overwritten
+        2. no direct jump
+    '''
+    ans = []
+    factory = InstructionInfoFactory()
+
+    for i in range(len(clone_pairs)):
+        pair = clone_pairs[i]
+        insn0:Instruction = all_insts[pair[0]]
+
+        regs = []
+        if insn0.memory_base != Register.NONE:
+            regs.append(insn0.memory_base)
+        if insn0.memory_index != Register.NONE:
+            regs.append(insn0.memory_index)
+        
+        fail = False
+        for j in range(pair[0], pair[1]):
+            ins:Instruction = all_insts[j]
+            info:InstructionInfo = factory.info(ins)
+            for k in range(ins.op_count):
+                if ins.op_kind(k) == OpKind.REGISTER and iswrite(info.op_access(k)) and isrelevant(ins.op_register(k), regs):
+                    fail = True
+                    break
+                if code_to_str[ins.code].startswith("JMP"):
+                    fail = True
+                    break
+            
+            if fail:
+                break
+        if not fail:
+            ans.append(pair)
+    
+    return ans
+
+
 def select_line_check(all_insts:list[Instruction], pc_dPosMap:dict[int, tuple[str, int, int, str]], pairs:list[tuple[int, int]]):
     ans = []
 
@@ -123,10 +186,11 @@ def select_line_check(all_insts:list[Instruction], pc_dPosMap:dict[int, tuple[st
     return ans
 
 
-def select_match_vars(jsonPath:str, all_insts:list[Instruction], pc_dPosMap:dict[int, tuple[str, int, int, str]], pairs:list[tuple[int, int]]) -> list[set[AddressExp]]:
+def select_no_match_vars(jsonPath:str, all_insts:list[Instruction], pc_dPosMap:dict[int, tuple[str, int, int, str]], pairs:list[tuple[int, int]], clone:bool) -> list[set[AddressExp]]:
     ans = []
     mgr = VarMgr()
-    mgr.load(jsonPath)
+    if jsonPath != "":
+        mgr.load(jsonPath)
 
     for i in range(len(pairs)):
         try:
@@ -135,41 +199,44 @@ def select_match_vars(jsonPath:str, all_insts:list[Instruction], pc_dPosMap:dict
             print(f"processing {i} pair")
             insn0:Instruction = all_insts[pair[0]]
             insn1:Instruction = all_insts[pair[1]]
-            firstip, secondip = insn0.ip, all_insts[pair[1]].ip
-            addrExps, tmp = mgr.find(firstip), mgr.find(secondip)
-            addrExps.intersection_update(tmp)
-            print(f"need analyze {len(addrExps)} addrExps")
-            src_ind, dst_ind = 1, 0
-            if insn0.op_count == 1:
-                src_ind, dst_ind = 0, 0
 
             names_from_dwarf = []
-            # for addrExp in addrExps:
-            #     piece_name = f"/tmp/{firstip:X}_{secondip:X}_{addrExp.name}"
-            #     startpc, endpc = addrExp.startpc, addrExp.endpc
-            #     l, r = find_l_ind(all_insts, startpc), find_l_ind(all_insts, endpc)
-            #     piece_asm, piece_addrs = construct(all_insts[l:r], startpc, endpc)
-            #     with open(piece_name + ".S", "w") as piece_asm_file:
-            #         piece_asm_file.write(piece_asm)
-                
-            #     ret = os.system(f"as {piece_name}.S -o {piece_name}.o && ld {piece_name}.o -Ttext 0 -o {piece_name}")
+            if clone:
+                firstip, secondip = insn0.ip, all_insts[pair[1]].ip
+                addrExps, tmp = mgr.find(firstip), mgr.find(secondip)
+                addrExps.intersection_update(tmp)
+                print(f"need analyze {len(addrExps)} addrExps")
+                src_ind, dst_ind = 1, 0
+                if insn0.op_count == 1:
+                    src_ind, dst_ind = 0, 0
 
-            #     piece_file = open(piece_name, "rb")
-            #     proj = angr.Project(piece_file, load_options={'auto_load_libs' : False})
-            #     cfg:angr.analyses.cfg.cfg_fast.CFGFast = proj.analyses.CFGFast()
-            #     analysis:Analysis = Analysis(proj, cfg)
-            #     analysis.analyzeCFG()
+            
+                for addrExp in addrExps:
+                    piece_name = f"/tmp/{firstip:X}_{secondip:X}_{addrExp.name}"
+                    startpc, endpc = addrExp.startpc, addrExp.endpc
+                    l, r = find_l_ind(all_insts, startpc), find_l_ind(all_insts, endpc)
+                    piece_asm, piece_addrs = construct(all_insts[l:r], startpc, endpc)
+                    with open(piece_name + ".S", "w") as piece_asm_file:
+                        piece_asm_file.write(piece_asm)
+                    
+                    ret = os.system(f"as {piece_name}.S -o {piece_name}.o && ld {piece_name}.o -Ttext 0 -o {piece_name}")
 
-            #     reses = analysis.match(addrExp, DwarfType(addrExp.type), piece_addrs, True, False)
+                    piece_file = open(piece_name, "rb")
+                    proj = angr.Project(piece_file, load_options={'auto_load_libs' : False})
+                    cfg:angr.analyses.cfg.cfg_fast.CFGFast = proj.analyses.CFGFast()
+                    analysis:Analysis = Analysis(proj, cfg)
+                    analysis.analyzeCFG()
 
-            #     for res in reses:
-            #         if res.addr == firstip:
-            #             if code_to_str[insn0.code].startswith("TEST") or code_to_str[insn0.code].startswith("CMP") or \
-            #             (isDestPos(res.matchPos) and insn0.op_kind(dst_ind) == OpKind.MEMORY) or \
-            #             (not isDestPos(res.matchPos) and insn0.op_kind(src_ind) == OpKind.MEMORY):
-            #                 names_from_dwarf.append(addrExp.name)
-                
-            #     analysis.clear()
+                    reses = analysis.match(addrExp, DwarfType(addrExp.type), piece_addrs, True, False)
+
+                    for res in reses:
+                        if res.addr == firstip:
+                            if code_to_str[insn0.code].startswith("TEST") or code_to_str[insn0.code].startswith("CMP") or \
+                            (isDestPos(res.matchPos) and insn0.op_kind(dst_ind) == OpKind.MEMORY) or \
+                            (not isDestPos(res.matchPos) and insn0.op_kind(src_ind) == OpKind.MEMORY):
+                                names_from_dwarf.append(addrExp.name)
+                    
+                    analysis.clear()
 
             line_content = ""
             # print(f"sed -n {pc_dPosMap[insn0.ip][1]}p {pc_dPosMap[insn0.ip][0]}")
@@ -209,10 +276,12 @@ def select_match_vars(jsonPath:str, all_insts:list[Instruction], pc_dPosMap:dict
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("binPath")
-    parser.add_argument("jsonPath")
+    parser.add_argument("--jsonPath", "-jP", help="provide variable json file generated by extracter", default="")
     parser.add_argument("--clone", "-c", action="store_true")
     parser.add_argument("--line", "-l", action="store_true")
     parser.add_argument("--show", "-s", help="print instruction code meanwhile", action="store_true")
+    parser.add_argument("--saveVisit", "-sV", default="")
+    parser.add_argument("--useVisit", "-uV", default="")
     parser.add_argument("--output", "-o", help="specify result output path", default="")
     args:argparse.Namespace = parser.parse_args()
     
@@ -240,10 +309,19 @@ if __name__ == "__main__":
         all_insts.append(inst)
     
     file.close()
-    
+
+    ''' binary check part
+    '''
     # get candidate instruction id pair
     clone_pairs = find_clone_pair(all_insts)
 
+    if args.useVisit != "":
+        clone_pairs = select_unvisit(clone_pairs, args.useVisit)
+
+    clone_pairs = select_valid_range(clone_pairs, all_insts)
+
+    ''' debug info check part
+    '''
     # get source line map
     pc_dPosMap = parse_Objdump(args.binPath, [])
 
@@ -252,14 +330,9 @@ if __name__ == "__main__":
         clone_pairs = select_line_check(all_insts, pc_dPosMap, clone_pairs)
 
     # select pairs that match other variable
-    if args.clone:
-        clone_pairs = select_match_vars(args.jsonPath, all_insts, pc_dPosMap, clone_pairs)
+    clone_pairs = select_no_match_vars(args.jsonPath, all_insts, pc_dPosMap, clone_pairs, args.clone)
+
+    if args.saveVisit != "":
+        save_visit(clone_pairs, args.saveVisit)
 
     print(f"{len(clone_pairs)} in total")
-    if res_path == "":
-        for pair in clone_pairs:
-            inst_i, inst_j = all_insts[pair[0]], all_insts[pair[1]]
-            if args.show:
-                print(res_str(inst_i, inst_j))
-            else:
-                print(f"{inst_i.ip:X} {inst_j.ip:X}")
